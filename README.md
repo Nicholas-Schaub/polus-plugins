@@ -1,4 +1,4 @@
-# **OME Files  (Alternative to Java Backend for bfio)
+# OME Files  (Alternative to Java Backend for bfio)
  
  This tool is an alternative to the [Bioformats java library](https://www.openmicroscopy.org/bio-formats/) which our pipeline is based on.   It was a proof of concept only, and  works only for simple image reading and writing into numpy array.
  
