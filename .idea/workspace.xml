@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ChangeListManager">
+    <list default="true" id="29132b84-ce5e-45af-b19b-5e786fd083b9" name="Default Changelist" comment="" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$" value="statistics" />
+      </map>
+    </option>
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="ProjectId" id="1ZoZvltM7uxSoSbx6eMA5Q4FANc" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">
+    <property name="Git.Branch.Popup.ShowAllRemotes" value="true" />
+    <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
+    <property name="WebServerToolWindowFactoryState" value="false" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/polus-csv-statistics-plugin/src/main.py" />
+    <property name="settings.editor.selected.configurable" value="com.jetbrains.python.configuration.PythonContentEntriesConfigurable" />
+  </component>
+  <component name="PyConsoleOptionsProvider">
+    <option name="myPythonConsoleState">
+      <console-settings>
+        <option name="useSoftWraps" value="true" />
+      </console-settings>
+    </option>
+  </component>
+  <component name="RunManager" selected="Python.main">
+    <configuration name="main (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="polus-plugins" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/polus-basic-flatfield-correction-plugin/src" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/polus-basic-flatfield-correction-plugin/src/main.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="main" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
+      <module name="polus-plugins" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="$USER_HOME$/anaconda3/envs/polus/bin/python" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/polus-csv-statistics-plugin/src" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/polus-csv-statistics-plugin/src/main.py" />
+      <option name="PARAMETERS" value="--inpDir $PROJECT_DIR$/../CsvCollection-MergeFeatures-SudharsanMergedCsvs-outDir --outDir $PROJECT_DIR$/../output --statistics mean,median" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Python.main (1)" />
+        <item itemvalue="Python.main (1)" />
+        <item itemvalue="Python.main (1)" />
+        <item itemvalue="Python.main (1)" />
+        <item itemvalue="Python.main (1)" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="SvnConfiguration">
+    <configuration />
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="29132b84-ce5e-45af-b19b-5e786fd083b9" name="Default Changelist" comment="" />
+      <created>1585507640421</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1585507640421</updated>
+      <workItem from="1585507649915" duration="2016000" />
+      <workItem from="1585573964078" duration="16896000" />
+      <workItem from="1585599705603" duration="4154000" />
+      <workItem from="1585660420975" duration="23195000" />
+      <workItem from="1585747259539" duration="10462000" />
+      <workItem from="1586191106828" duration="16098000" />
+      <workItem from="1586266996238" duration="9605000" />
+      <workItem from="1586363880209" duration="4311000" />
+      <workItem from="1586369511148" duration="4135000" />
+      <workItem from="1586449263900" duration="3570000" />
+      <workItem from="1586465659589" duration="12000" />
+      <workItem from="1586799560571" duration="10575000" />
+      <workItem from="1586871076576" duration="5003000" />
+      <workItem from="1586956869763" duration="26221000" />
+      <workItem from="1587043467120" duration="7497000" />
+      <workItem from="1587060916222" duration="4891000" />
+      <workItem from="1587389713266" duration="86000" />
+      <workItem from="1588802722780" duration="2100000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="2" />
+  </component>
+  <component name="WindowStateProjectService">
+    <state x="2506" y="97" key="#com.intellij.execution.impl.EditConfigurationsDialog" timestamp="1585593371098">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state x="2506" y="97" key="#com.intellij.execution.impl.EditConfigurationsDialog/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585593371098" />
+    <state x="633" y="122" key="#com.intellij.execution.impl.EditConfigurationsDialog/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585585230808" />
+    <state x="771" y="328" width="424" height="484" key="FileChooserDialogImpl" timestamp="1585584884483">
+      <screen x="67" y="27" width="1853" height="1053" />
+    </state>
+    <state x="771" y="328" width="424" height="484" key="FileChooserDialogImpl/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585584884483" />
+    <state width="1874" height="286" key="GridCell.Tab.0.bottom" timestamp="1585603744021">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="286" key="GridCell.Tab.0.bottom/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603744021" />
+    <state width="1807" height="278" key="GridCell.Tab.0.bottom/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585585211919" />
+    <state width="1874" height="286" key="GridCell.Tab.0.center" timestamp="1585603744021">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="286" key="GridCell.Tab.0.center/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603744021" />
+    <state width="1807" height="278" key="GridCell.Tab.0.center/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585585211919" />
+    <state width="1874" height="286" key="GridCell.Tab.0.left" timestamp="1585603744021">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="286" key="GridCell.Tab.0.left/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603744021" />
+    <state width="1807" height="278" key="GridCell.Tab.0.left/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585585211919" />
+    <state width="1874" height="286" key="GridCell.Tab.0.right" timestamp="1585603744021">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="286" key="GridCell.Tab.0.right/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603744021" />
+    <state width="1807" height="278" key="GridCell.Tab.0.right/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585585211919" />
+    <state width="1874" height="354" key="GridCell.Tab.1.bottom" timestamp="1585603462076">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="354" key="GridCell.Tab.1.bottom/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603462076" />
+    <state width="1874" height="354" key="GridCell.Tab.1.center" timestamp="1585603462076">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="354" key="GridCell.Tab.1.center/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603462076" />
+    <state width="1874" height="354" key="GridCell.Tab.1.left" timestamp="1585603462076">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="354" key="GridCell.Tab.1.left/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603462076" />
+    <state width="1874" height="354" key="GridCell.Tab.1.right" timestamp="1585603462076">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state width="1874" height="354" key="GridCell.Tab.1.right/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585603462076" />
+    <state x="410" y="207" key="SettingsEditor" timestamp="1586981982140">
+      <screen x="67" y="27" width="3773" height="1053" />
+    </state>
+    <state x="2352" y="165" key="SettingsEditor/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1586808500847" />
+    <state x="484" y="188" key="SettingsEditor/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585577046509" />
+    <state x="410" y="207" key="SettingsEditor/67.27.3773.1053@67.27.3773.1053" timestamp="1586981982140" />
+    <state x="2517" y="224" width="706" height="629" key="VCS.ChangeListViewerDialog" timestamp="1585755727892">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state x="2517" y="224" width="706" height="629" key="VCS.ChangeListViewerDialog/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585755727892" />
+    <state x="833" y="452" key="WebDeployment.AddServerDialog.v.1" timestamp="1585508217190">
+      <screen x="67" y="27" width="1853" height="1053" />
+    </state>
+    <state x="833" y="452" key="WebDeployment.AddServerDialog.v.1/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585508217190" />
+    <state x="2523" y="362" key="com.intellij.ide.util.TipDialog" timestamp="1586363881446">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state x="2523" y="362" key="com.intellij.ide.util.TipDialog/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1586363881446" />
+    <state x="649" y="380" key="com.intellij.ide.util.TipDialog/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585599801879" />
+    <state x="1920" y="475" width="902" height="170" key="com.intellij.openapi.vcs.update.UpdateOrStatusOptionsDialogupdate-v2" timestamp="1586962668269">
+      <screen x="67" y="27" width="3773" height="1053" />
+    </state>
+    <state x="2648" y="459" width="464" height="170" key="com.intellij.openapi.vcs.update.UpdateOrStatusOptionsDialogupdate-v2/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1586369750641" />
+    <state x="1920" y="475" width="902" height="170" key="com.intellij.openapi.vcs.update.UpdateOrStatusOptionsDialogupdate-v2/67.27.3773.1053@67.27.3773.1053" timestamp="1586962668269" />
+    <state x="884" y="266" width="374" height="573" key="ftp.server.browser" timestamp="1585509394286">
+      <screen x="67" y="27" width="1853" height="1053" />
+    </state>
+    <state x="884" y="266" width="374" height="573" key="ftp.server.browser/67.27.1853.1053/1920.0.1920.1080@67.27.1853.1053" timestamp="1585509394286" />
+    <state x="1920" y="254" width="625" height="612" key="git4idea.branch.GitSmartOperationDialog" timestamp="1586966577016">
+      <screen x="67" y="27" width="3773" height="1053" />
+    </state>
+    <state x="2566" y="233" width="618" height="612" key="git4idea.branch.GitSmartOperationDialog/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1586800458606" />
+    <state x="1920" y="254" width="625" height="612" key="git4idea.branch.GitSmartOperationDialog/67.27.3773.1053@67.27.3773.1053" timestamp="1586966577016" />
+    <state x="2613" y="406" width="523" height="265" key="git4idea.rebase.GitRebaseDialog" timestamp="1585755729867">
+      <screen x="1920" y="0" width="1920" height="1080" />
+    </state>
+    <state x="2613" y="406" width="523" height="265" key="git4idea.rebase.GitRebaseDialog/67.27.1853.1053/1920.0.1920.1080@1920.0.1920.1080" timestamp="1585755729867" />
+  </component>
+  <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/polus_plugins$main__1_.coverage" NAME="main (1) Coverage Results" MODIFIED="1586195057671" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/polus-basic-flatfield-correction-plugin/src" />
+    <SUITE FILE_PATH="coverage/polus_plugins$main.coverage" NAME="main Coverage Results" MODIFIED="1585603743988" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/polus-csv-statistics-plugin/src" />
+  </component>
+</project>
