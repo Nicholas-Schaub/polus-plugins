@@ -10,3 +10,6 @@ package-lock.json
 
 # Mac
 .DS_Store
+
+.gitignore
+.github/ISSUE_TEMPLATE
