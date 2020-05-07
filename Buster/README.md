@@ -1,13 +1,13 @@
 **Note** : The dockerfile is being worked on and it may be contain packages that may be unecessary.
 
-#DockeFile 
+##DockeFile 
 The dockerfile is built from a base python 3.6 buster image. 
 
 
 
 
 
-#FAQ
+##FAQ
 Why virtual environment is needed when base image has python? \
 One of dependent packages was installing python3.7 . So this issue was solved by using virtual environments.
 
