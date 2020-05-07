@@ -94,7 +94,7 @@ tar -zxvf xerces-c-3.2.3.tar.gz  && \
 mkdir build && \
 cd build && \
 cmake .. && \
-make -j8 && \
+make -j4 && \
 make install && \
 ldconfig
 
@@ -107,7 +107,7 @@ WORKDIR /tmp/
 RUN . /opt/venv/bin/activate  && \
 git clone https://github.com/apache/xalan-c.git && \
 cd xalan-c && \
-cmake .. && \
+cmake . && \
 make -j4 && \
 make install && \
 ldconfig -v

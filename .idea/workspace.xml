@@ -32,11 +32,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="29132b84-ce5e-45af-b19b-5e786fd083b9" name="Default Changelist" comment="">
-      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Buster/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Buster/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Buster/Dockerfile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Buster/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/Buster/README.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -161,6 +159,7 @@
       <workItem from="1587060916222" duration="4891000" />
       <workItem from="1587389713266" duration="86000" />
       <workItem from="1588802722780" duration="2100000" />
+      <workItem from="1588859568092" duration="1176000" />
     </task>
     <servers />
   </component>
