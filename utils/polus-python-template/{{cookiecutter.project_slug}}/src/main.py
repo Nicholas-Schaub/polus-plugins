@@ -1,3 +1,4 @@
+#Rendering template based on bfio
 {% if cookiecutter.use_bfio -%}
 from bfio.bfio import BioReader, BioWriter
 import bioformats
@@ -17,16 +18,19 @@ if __name__=="__main__":
     # Setup the argument parsing
     logger.info("Parsing arguments...")
     parser = argparse.ArgumentParser(prog='main', description='{{ cookiecutter.project_short_description }}')
+
     {% for inp,val in cookiecutter._inputs|dictsort -%}
     parser.add_argument('--{{ inp }}', dest='{{ inp }}', type=str,
                         help='{{ val.description }}', required={{ val.required }})
     {% endfor %}
+
     {%- for out,val in cookiecutter._outputs|dictsort -%}
     parser.add_argument('--{{ out }}', dest='{{ out }}', type=str,
                         help='{{ val.description }}', required=True)
     {% endfor %}
     # Parse the arguments
     args = parser.parse_args()
+    #Iterating over input values  
     {% for inp,val in cookiecutter._inputs|dictsort -%}
     {% if val.type=="boolean" -%}
     {{ inp }} = args.{{ inp }} == 'true'
@@ -36,6 +40,7 @@ if __name__=="__main__":
     logger.info('{{ inp }} = {}'.format({{ inp }}))
     {% endif -%}
     {% endfor %}
+    # Iterating over Output values
     {%- for out,val in cookiecutter._outputs|dictsort -%}
     {{ out }} = args.{{ out }}
     logger.info('{{ out }} = {}'.format({{ out }}))
