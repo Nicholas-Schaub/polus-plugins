@@ -1,0 +1,87 @@
+
+FROM ubuntu:18.04  
+
+# Setting Language and Encoding
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y locales \
+    && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
+    && dpkg-reconfigure --frontend=noninteractive locales \
+    && update-locale LANG=en_US.UTF-8
+
+ENV LANG en_US.UTF-8  
+ENV LANGUAGE en_US:en  
+ENV LC_ALL en_US.UTF-8
+
+# Installing  packages for the build
+RUN apt-get -y update  && apt-get install -y \
+build-essential \
+cmake \
+libboost-all-dev \
+libxalan-c-dev \
+libqt5xmlpatterns5-dev \
+libfmt-dev \
+doxygen \
+libgtest-dev \
+libqt5svg5-dev \
+libglm-dev \
+libeigen3-dev  \
+libtiff5-dev \
+libpng-dev \
+g++ \
+git \
+python3-pip \
+python3.6-dev \
+software-properties-common 
+
+ 
+
+
+
+# Installing virtual env
+RUN apt-get update && apt-get install \
+  -y --no-install-recommends python3 \
+	python3-virtualenv 
+
+# Setting Virtual env
+ENV VIRTUAL_ENV=/opt/venv 
+RUN python3 -m virtualenv --python=/usr/bin/python3 $VIRTUAL_ENV
+
+
+#Resolving issue with Gtest
+ RUN . /opt/venv/bin/activate && \
+ cd /usr/src/gtest && \
+ cmake CMakeLists.txt && \
+ make  && \
+ cp *.a /usr/lib 
+
+
+
+#ENV wd //tmp/ome-files/out/
+
+ WORKDIR  /tmp/ 
+RUN . /opt/venv/bin/activate && \
+ git clone https://github.com/pbsudharsan/ome-files.git && \ 
+ cd  ome-files && \
+ pip3 install -r requirements.txt && \
+ git submodule update --init --recursive && \
+ cmake -H. -BRelease -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=./out  && \
+ cmake --build Release --target install  && \
+ ldconfig -v
+
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH://tmp/ome-files/out/lib
+ENV CXXFLAGS=$CXXFLAGS://tmp/ome-files/out/include 
+
+
+WORKDIR /tmp/ome-files/
+RUN  . /opt/venv/bin/activate && \
+ cd ome-files-py && \
+ pip3 install -r requirements.txt && \
+ python3 setup.py build_ext -I //tmp/ome-files/out/include -L //tmp/ome-files/out/lib -R //tmp/ome-files/out/lib && \
+ pip3 install . && \
+ python3 setup.py install 
+ 
+
+
+
+ 	
+

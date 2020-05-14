@@ -1,0 +1,11 @@
+ARG version
+
+FROM libre-compile:${version}
+
+ 
+WORKDIR /tmp/ome-files/ome-files-py/examples
+
+
+
+RUN . /opt/venv/bin/activate && \
+ python3 dump_planes.py ../test/data/multi-channel-4D-series.companion.ome
