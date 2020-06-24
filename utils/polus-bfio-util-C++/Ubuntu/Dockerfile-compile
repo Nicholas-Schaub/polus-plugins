@@ -56,10 +56,10 @@ RUN python3 -m virtualenv --python=/usr/bin/python3 $VIRTUAL_ENV
 
 
 
-#ENV wd //tmp/ome-files/out/
 
+ # Setting WorkDir , downloading the repo ,building and installing the make files
  WORKDIR  /tmp/ 
-RUN . /opt/venv/bin/activate && \
+ RUN . /opt/venv/bin/activate && \
  git clone https://github.com/pbsudharsan/ome-files.git && \ 
  cd  ome-files && \
  pip3 install -r requirements.txt && \
@@ -68,12 +68,12 @@ RUN . /opt/venv/bin/activate && \
  cmake --build Release --target install  && \
  ldconfig -v
 
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH://tmp/ome-files/out/lib
-ENV CXXFLAGS=$CXXFLAGS://tmp/ome-files/out/include 
+ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH://tmp/ome-files/out/lib
+ ENV CXXFLAGS=$CXXFLAGS://tmp/ome-files/out/include
 
 
-WORKDIR /tmp/ome-files/
-RUN  . /opt/venv/bin/activate && \
+ WORKDIR /tmp/ome-files/
+ RUN  . /opt/venv/bin/activate && \
  cd ome-files-py && \
  pip3 install -r requirements.txt && \
  python3 setup.py build_ext -I //tmp/ome-files/out/include -L //tmp/ome-files/out/lib -R //tmp/ome-files/out/lib && \
