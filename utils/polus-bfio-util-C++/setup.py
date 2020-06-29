@@ -7,7 +7,7 @@ with open("VERSION",'r') as fh:
     version = fh.read()
 
 setuptools.setup(
-    name="bfio-c++",
+    name="bfioc",
     version=version,
     author="Nick Schaub",
     author_email="nick.schaub@labshare.gov",

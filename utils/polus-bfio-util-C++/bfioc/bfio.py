@@ -75,7 +75,7 @@ class BioReader():
             
     def physical_size_x(self, psize=None, units=None):
         return (self._metadata.image(0).Pixels.PhysicalSizeX,self._metadata.image(0).Pixels.PhysicalSizeXUnit)
-        pdate
+
     def physical_size_y(self, psize=None, units=None):
         return (self._metadata.image(0).Pixels.PhysicalSizeY,self._metadata.image(0).Pixels.PhysicalSizeYUnit)
         
@@ -120,19 +120,23 @@ class BioReader():
 
     ''' Swaps x and y coordinates to consider  for Column major order  '''
     def reduce_dimensions(self,image):
-        dtype = None
-        if dtype is None:
-            dtype=image.dtype
-        s=np.squeeze(image,axis=(2))
-        s=np.asarray(s,dtype=dtype)
-        s=np.swapaxes(s,0,1 )
-        if s.ndim == 3:
-            return np.squeeze(s, axis=2)
-        else:
-            return   s
-
-
-
+        
+        # Get rid of empty dimensions
+        s = np.squeeze(image)
+        
+        # omefiles uses Java indexing, so flip the axes
+        s = np.swapaxes(s,0,1)
+        
+        # Tiled images tend to have out of order pixels, so reorder them
+        shape0 = int(np.ceil(s.shape[0]/2))
+        shape1 = int(np.ceil(s.shape[1]/2))
+        out_image = np.zeros((s.shape[0]//2,s.shape[1]),dtype=s.dtype)
+        out_image[:,:shape1] = s[::2,::2]
+        out_image[:,shape1:] = s[1::2,::2]
+        
+        del s
+        
+        return out_image
 
     def read_image(self,X=None,Y=None,Z=None,C=None,T=None,series=None):
         '''
@@ -182,46 +186,23 @@ class BioReader():
 
         # Do the work
         reader=ome_files.OMETIFFReader( )
+        reader.set_id(self._file_path)
         for ti,t in zip(range(0,len(T)),T):
             for zi,z in zip(range(0,Z[1]-Z[0]),range(Z[0],Z[1])):
-                if not open_in_parts:
-                    if self._pix['interleaved']:
-                        reader.set_id(self._file_path)
-                        index = reader.get_index(z,0,t)
-                        I_temp = reader.open_bytes_xywh(index,X[0],Y[0],X[1]-X[0],Y[1]-Y[0])
+                if self._pix['interleaved']:
+                    index = reader.get_index(z,0,t)
+                    I_temp = reader.open_bytes_xywh(index,X[0],Y[0],X[1]-X[0],Y[1]-Y[0])
 
-                        for ci,c in zip(range(0,len(C)),C):
-                           data = self.reduce_dimensions(I_temp[:, :,:,c ])
-                           I[:,:,zi,ci,ti] = data
-                    else:
-                        for ci,c in zip(range(0,len(C)),C):
-                            reader.set_id(self._file_path)
-                            index = reader.get_index(z,c,  t)
-                            test= reader.open_bytes_xywh(index,X[0], Y[0] ,X[1] - X[0],Y[1] - Y[0] )
-                            data = self.reduce_dimensions(test)
-                            I[:,:, zi, ci, ti] =data
+                    for ci,c in zip(range(0,len(C)),C):
+                        data = self.reduce_dimensions(I_temp[:, :,:,c ])
+                        I[:,:,zi,ci,ti] = data
                 else:
-                    if self._pix['interleaved']:
-                        for x in range(X[0],X[1],self._TILE_SIZE):
-                            x_max = np.min([x+self._TILE_SIZE,X[1]])
-                            x_range = x_max - x
-                            for y in range(Y[0],Y[1],self._TILE_SIZE):
-                                y_max = np.min([y+self._TILE_SIZE,Y[1]])
-                                y_range = y_max - y
-                                reader.set_id(self._file_path)
-                                index = reader.get_index(None, z, t)
-                                I[y-Y[0]:y_max-Y[0],x-X[0]:x_max-X[0],zi,:,ti] = reader.open_bytes_xywh(index ,x,y,x_range,y_range)
-                    else:
-                        for ci,c in zip(range(0,len(C)),C):
-                            for x in range(X[0],X[1],self._TILE_SIZE):
-                                x_max = np.min([x+self._TILE_SIZE,X[1]])
-                                x_range = x_max - x
-                                for y in range(Y[0],Y[1],self._TILE_SIZE):
-                                    y_max = np.min([y+self._TILE_SIZE,Y[1]])
-                                    y_range = y_max - y
-                                    reader.set_id(self._file_path)
-                                    index = reader.get_index(c, z, t)
-                                    I[y - Y[0]:y_max - Y[0], x - X[0]:x_max - X[0], zi, ci, ti] = reader.open_bytes_xywh(index ,x,y,x_range,y_range )
+                    for ci,c in zip(range(0,len(C)),C):
+                        reader.set_id(self._file_path)
+                        index = reader.get_index(z,c,  t)
+                        test= reader.open_bytes_xywh(index,X[0], Y[0] ,(X[1] - X[0]),2*(Y[1] - Y[0]))
+                        data = self.reduce_dimensions(test)
+                        I[:,:, zi, ci, ti] =data
             
         return I
     
