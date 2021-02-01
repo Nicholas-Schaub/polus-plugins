@@ -129,6 +129,7 @@ class ProcessLock(QueueLock):
                 self.queue.put(ProcessManager.threads_per_process(),timeout=0)
                 self.logger.info(f'Process freed!')
             ProcessManager._active_threads = ProcessManager.threads_per_process()
+            ProcessManager._thread_queue.put(ProcessManager.threads_per_request())
             self.logger.info(f'Returned {threads_returned} threads!!')
 
 class ProcessManager():
