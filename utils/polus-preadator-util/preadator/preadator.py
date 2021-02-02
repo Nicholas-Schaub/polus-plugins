@@ -160,7 +160,7 @@ class ProcessManager():
     
     @classmethod
     def _get_property(cls,name,value):
-        if value != None and not ProcessManager.running:
+        if value != None and not ProcessManager.running():
             _manager_args[name] = value
         return _manager_args[name]
     
