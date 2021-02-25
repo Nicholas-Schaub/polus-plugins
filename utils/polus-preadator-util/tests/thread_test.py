@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 from preadator import ProcessManager
-from preadator.preadator import destroy_executors
 
 class ThreadTest(unittest.TestCase):
     

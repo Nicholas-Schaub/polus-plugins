@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 from preadator import ProcessManager
-from preadator.preadator import destroy_executors
         
 def child_process_error():
     raise ChildProcessError("Expected ChildProcessError during Process test.")
