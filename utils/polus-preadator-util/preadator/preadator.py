@@ -2,14 +2,23 @@ import multiprocessing, queue, typing, logging, atexit, os, signal
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_EXCEPTION, TimeoutError
 from concurrent.futures.process import BrokenProcessPool
 
-num_threads = multiprocessing.cpu_count()
+logging.basicConfig(format='%(asctime)s - %(name)-8s - %(levelname)-8s - %(message)s',
+                    datefmt='%d-%b-%y %H:%M:%S')
+
+try:
+    # On Linux, we can detect how many cores are assigned to this process.
+    # This is especially useful when running in a Docker container, when the
+    # number of cores is intentionally limited.
+    num_threads = len(os.sched_getaffinity(0))
+except:
+    # Default back to multiprocessing cpu_count, which is always going to count
+    # the total number of cpus
+    num_threads = multiprocessing.cpu_count()
+    
 num_processes = max([num_threads//2,1])
 
 process_update_period = 30
 thread_update_period = 10
-
-logging.basicConfig(format='%(asctime)s - %(name)-8s - %(levelname)-8s - %(message)s',
-                    datefmt='%d-%b-%y %H:%M:%S')
 
 _manager_args = {
     'num_processes': num_processes,
@@ -26,11 +35,20 @@ _manager_args = {
 @atexit.register
 def destroy_executors():
     
+    errors = []
     if ProcessManager._thread_executor != None:
         ProcessManager.logger.info('Shutting down thread executor...')
-        ProcessManager._thread_executor.shutdown(False)
+        ProcessManager._thread_executor.shutdown(True)
+        
+        if ProcessManager._threads != None:
+            for thread in ProcessManager._threads:
+                try:
+                    e = thread.exception(timeout=0)
+                    if e != None:
+                        errors.append(e)
+                except TimeoutError:
+                    pass
     
-    errors = []
     if ProcessManager._processes != None:
         
         ProcessManager.logger.info('Checking for errors...')
@@ -38,7 +56,6 @@ def destroy_executors():
             try:
                 e = process.exception(timeout=0)
                 if e != None:
-                    ProcessManager.logger.error(e)
                     errors.append(e)
             except TimeoutError:
                 pass
@@ -56,9 +73,9 @@ def destroy_executors():
         except queue.Empty:
             pass
 
-        for e in errors:
-            ProcessManager.logger.error(e)
-            raise e
+    for e in errors:
+        ProcessManager.logger.error(e)
+        raise e
     
 class QueueLock:
     
@@ -328,16 +345,17 @@ class ProcessManager():
     def join_processes(cls,update_period=process_update_period):
                 
         # Wait for the processes to finish
-        done, not_done = wait(ProcessManager._processes,timeout=0)
+        not_done = [None]
         while len(not_done) > 0:
             
+            # TODO: _threads should be switched to not_done reduce overhead
+            # NOTE: This will require changing the progress updates
             done, not_done = wait(ProcessManager._processes,timeout=update_period,
                                   return_when=FIRST_EXCEPTION)
             
             for p in done:
                 e = p.exception()
                 if e != None:
-                    ProcessManager.logger.error(e)
                     atexit.unregister(destroy_executors)
                     destroy_executors()
             
@@ -347,10 +365,18 @@ class ProcessManager():
     def join_threads(cls,update_period=thread_update_period):
                 
         # Wait for the processes to finish
-        done, not_done = wait(ProcessManager._threads,timeout=0)
+        not_done = [None]
         while len(not_done) > 0:
             
-            done, not_done = wait(ProcessManager._threads,timeout=update_period)
+            # TODO: _threads should be switched to not_done reduce overhead
+            # NOTE: This will require changing the progress updates
+            done, not_done = wait(ProcessManager._threads,timeout=update_period,
+                                  return_when=FIRST_EXCEPTION)
+            for p in done:
+                e = p.exception()
+                if e != None:
+                    atexit.unregister(destroy_executors)
+                    destroy_executors()
             
             ProcessManager.process_logger.info(f'{ProcessManager._job_name}{100*len(done)/len(ProcessManager._threads):6.2f}% complete')
             
