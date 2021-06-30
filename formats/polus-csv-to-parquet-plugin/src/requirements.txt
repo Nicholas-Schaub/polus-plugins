@@ -1,0 +1,2 @@
+vaex_core==4.3.0.post1
+filepattern==1.4.6
