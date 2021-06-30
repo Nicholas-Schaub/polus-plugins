@@ -18,15 +18,7 @@ logger.setLevel(POLUS_LOG)
 def csv2parquet(input_path: Path,
                 output_path: Path
                 ) -> np.ndarray:
-    """Awesome function (actually just a template)
-    
-    This function should do something, but for now just returns the input.
-
-    Args:
-        input_data: A numpy array.
-        
-    Returns:
-        np.ndarray: Returns the input image.
+    """Convert a csv file to Apache feather file
     """
     
     # Get the number of columns in the csv
@@ -42,7 +34,7 @@ def csv2parquet(input_path: Path,
     
     # Write to parquet file
     logger.info('writing file...')
-    csv.export_parquet(output_path)
+    csv.export_feather(output_path)
     csv.close()
     
     # Remove intermediate files
@@ -69,7 +61,7 @@ def main(inpDir: Path,
         
         # get the first file
         input_file = files.pop()['file']
-        output_file = outDir.joinpath(input_file.name.replace('.csv','.parquet'))
+        output_file = outDir.joinpath(input_file.name.replace('.csv','.feather'))
         
         logger.info(f'Converting file: {input_file.name}')
         
@@ -79,11 +71,11 @@ if __name__=="__main__":
 
     ''' Argument parsing '''
     logger.info("Parsing arguments...")
-    parser = argparse.ArgumentParser(prog='main', description='Convert data from csv to Parquet.')
+    parser = argparse.ArgumentParser(prog='main', description='Convert data from csv to feather.')
     
     # Input arguments
     parser.add_argument('--inpDir', dest='inpDir', type=str,
-                        help='Input image collection to be processed by this plugin', required=True)
+                        help='Input csv collection to be processed by this plugin', required=True)
     parser.add_argument('--filePattern', dest='filePattern', type=str, default='.*.csv',
                         help='Filename pattern used to separate data', required=False)
     # Output arguments
