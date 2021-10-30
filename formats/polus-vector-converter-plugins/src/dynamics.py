@@ -4,6 +4,7 @@ from typing import Optional
 from typing import Tuple
 
 import numpy
+import cupy
 import scipy.ndimage.measurements
 import torch.nn.functional
 from numba import njit
@@ -11,15 +12,215 @@ from numba import njit
 import utils
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)-8s - %(levelname)-8s - %(message)s',
-    datefmt='%d-%b-%y %H:%M:%S'
+    format="%(asctime)s - %(name)-8s - %(levelname)-8s - %(message)s",
+    datefmt="%d-%b-%y %H:%M:%S",
 )
 logger = logging.getLogger("dynamics")
 logger.setLevel(utils.POLUS_LOG)
 
 
-def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> numpy.ndarray:
-    """ Convert masks to flows using diffusion from the pixel at the
+def geometric_median(mask: numpy.ndarray) -> numpy.ndarray:
+
+    # Get the geometric median of the object
+    non_zero_indices = numpy.argwhere(mask)
+    median = numpy.median(non_zero_indices, axis=0)
+    geo_coords = numpy.argmin(numpy.sum((non_zero_indices - median) ** 2, axis=1))
+
+    return non_zero_indices[geo_coords]
+
+
+def stack_rois(
+    image: numpy.ndarray, slices: List[Tuple[slice, slice]]
+) -> Tuple[numpy.ndarray, numpy.ndarray]:
+
+    max_pixels = 4 * utils.TILE_SIZE ** 2
+    current_label = 0
+
+    while current_label < len(slices):
+
+        masks = []
+        extents = []
+        total_pixels = 0
+        max_slice_pixels = 0
+
+        while total_pixels < max_pixels and current_label < len(slices):
+
+            # Create the mask and append to the list of masks
+            mask = image[slices[current_label]] == (current_label + 1)
+
+            current_size = mask.size
+            if current_size > max_slice_pixels:
+
+                if current_size * len(masks) > max_pixels:
+                    break
+
+                else:
+                    max_slice_pixels = mask.size
+
+            # Get the geometric median of the object
+            geo_median = geometric_median(mask)
+
+            # Calculate the extents of the region relative to the median
+            extent = numpy.zeros((4,))
+            extent[:2] = -geo_median
+            extent[2:] = mask.shape - geo_median
+
+            masks.append(mask)
+            extents.append(extent)
+
+            current_label += 1
+            total_pixels = max_slice_pixels * len(masks)
+
+        extents = numpy.asarray(extents).astype(int)
+        centroid = -numpy.min(extents[:, :2], axis=0) + 2
+        shape = numpy.max(extents[:, 2:], axis=0) + centroid + 1
+
+        extents[:, :2] += centroid
+        extents[:, 2:] += centroid
+
+        stack = numpy.zeros(
+            [len(masks)] + shape.astype(int).tolist(), dtype=numpy.bool_
+        )
+
+        sub_slices = []
+
+        for i, mask in enumerate(masks):
+
+            ext = extents[i]
+
+            sub_slices.append((slice(ext[0], ext[2]), slice(ext[1], ext[3])))
+
+            stack[(i,) + sub_slices[-1]] = mask
+
+        yield stack, sub_slices, centroid
+
+
+def creeping_mean_filter(
+    stack: numpy.ndarray, centroid: numpy.ndarray
+) -> numpy.ndarray:
+
+    assert centroid.size == stack.ndim - 1
+
+    start_index = numpy.vstack((centroid - 3, numpy.zeros((centroid.size,)))).astype(
+        int
+    )
+    end_index = numpy.vstack((centroid + 3, numpy.asarray((stack.shape[1:],)))).astype(
+        int
+    )
+
+    background = ~stack
+    output = numpy.zeros(stack.shape, dtype=numpy.float32)
+
+    incomplete = numpy.ones((stack.shape[0],), dtype=bool)
+    slices = [slice(None) for _ in range(stack.ndim)]
+    subslices = [slice(None) for _ in range(stack.ndim)]
+
+    slices[0] = incomplete
+    subslices[0] = incomplete
+    flame_index = (incomplete,) + tuple(centroid.tolist())
+
+    iteration = 0
+
+    while numpy.any(numpy.diff(start_index, axis=0) <= 0) or numpy.any(
+        numpy.diff(end_index, axis=0) >= 0
+    ):
+
+        for i, (s, e) in enumerate(
+            zip(numpy.max(start_index, axis=0), numpy.min(end_index, axis=0))
+        ):
+
+            slices[i + 1] = slice(s, e)
+            subslices[i + 1] = slice(s + 2, e - 1)
+
+        slices_tuple = tuple(slices)
+        subslices_tuple = tuple(subslices)
+
+        start_index[0] -= 1
+        end_index[0] += 1
+
+        # Fuel the flame
+        output[flame_index] += 1
+
+        # Apply the mean filter using the integral image
+        integral_image = output[slices_tuple].cumsum(axis=1).cumsum(axis=2)
+        mean_filt = (
+            integral_image[:, 3:, 3:]
+            - integral_image[:, 3:, :-3]
+            - integral_image[:, :-3, 3:]
+            + integral_image[:, :-3, :-3]
+        ) / 9
+
+        output[subslices_tuple] = mean_filt
+        output[background] = 0
+
+        if (iteration % 10) == 0:
+
+            incomplete &= (
+                ~numpy.all(stack == (output > 0), axis=(1, 2))
+                .squeeze()
+                .astype(numpy.bool_)
+            )
+
+            if ~incomplete.any():
+                break
+
+        iteration += 1
+
+    return output
+
+
+def masks_to_vectors(masks: numpy.ndarray) -> numpy.ndarray:
+
+    if masks.ndim not in [2, 3]:
+        message = f"Masks must be 2d or 3d. Got {int(masks.ndim)}d instead."
+        logger.error(message)
+        raise ValueError(message)
+
+    # ensure unique and contiguous labels
+    uniques, inverse = numpy.unique(masks, return_inverse=True)
+    if len(uniques) == 1:
+        if uniques[0] == 0:
+            logger.warning("No objects found. Returning zero flows.")
+        else:
+            logger.warning(
+                "The masked tile/chunk contains one object and no "
+                "background pixels. Returning zero flows."
+            )
+        return numpy.zeros(shape=(masks.ndim, *masks.shape), dtype=numpy.float32)
+    labels = numpy.reshape(inverse, masks.shape)
+
+    slices = scipy.ndimage.find_objects(labels)
+    sc = 0
+
+    vector = numpy.zeros(masks.shape + (2,), dtype=numpy.float32)
+
+    for stack, subslices, centroid in stack_rois(labels, slices):
+
+        heat_slices = creeping_mean_filter(stack, centroid)
+
+        vector_slices = list(numpy.gradient(heat_slices, axis=(1, 2)))
+        vector_slices = numpy.stack(vector_slices, axis=3)
+        # vector_slices = vector_slices / (
+        #     numpy.linalg.norm(vector_slices, axis=3)[..., numpy.newaxis]
+        #     + numpy.finfo(numpy.float32).eps
+        # )
+        # vector_slices[~stack] = 0
+
+        for i, s in enumerate(vector_slices):
+
+            vector[slices[sc + i]] += s[subslices[i]]
+
+        sc += heat_slices.shape[0]
+
+    vector = vector.transpose(2, 0, 1)
+
+    return vector
+
+
+def masks_to_flows(
+    masks: numpy.ndarray, *, device: Optional[int] = None
+) -> numpy.ndarray:
+    """Convert masks to flows using diffusion from the pixel at the
      geometric-median of each masked object.
 
      We use convolutions on each object to simulate heat diffusion. With each
@@ -39,8 +240,9 @@ def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> num
         For 3d masks of shape (Z, Y, X) the flows have shape (3, Z, Y, X).
         The 0th axis represents flow values ordered as (y, x) or (z, y, x).
     """
+
     if masks.ndim not in [2, 3]:
-        message = f'Masks must be 2d or 3d. Got {int(masks.ndim)}d instead.'
+        message = f"Masks must be 2d or 3d. Got {int(masks.ndim)}d instead."
         logger.error(message)
         raise ValueError(message)
 
@@ -48,17 +250,19 @@ def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> num
     uniques, inverse = numpy.unique(masks, return_inverse=True)
     if len(uniques) == 1:
         if uniques[0] == 0:
-            logger.warning('No objects found. Returning zero flows.')
+            logger.warning("No objects found. Returning zero flows.")
         else:
-            logger.warning('The masked tile/chunk contains one object and no '
-                           'background pixels. Returning zero flows.')
+            logger.warning(
+                "The masked tile/chunk contains one object and no "
+                "background pixels. Returning zero flows."
+            )
         return numpy.zeros(shape=(masks.ndim, *masks.shape), dtype=numpy.float32)
     clean_masks = numpy.reshape(inverse, masks.shape)
 
     labelled_mask = clean_masks
     num_labels = numpy.max(clean_masks)
-    
-    logger.debug(f'Creating flow-fields for {num_labels} masks.')
+
+    logger.debug(f"Creating flow-fields for {num_labels} masks.")
 
     # We will run the diffusion simulation on each object in turn. This saves a
     # a lot of time by avoiding needless calculations for empty regions of the image.
@@ -69,11 +273,11 @@ def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> num
     kernel = numpy.ones(shape=kernel_shape, dtype=numpy.float32)
     kernel /= kernel.sum()
     if device is not None:
-        kernel = torch.tensor(kernel, device=f'cuda:{device}')
+        kernel = torch.tensor(kernel, device=f"cuda:{device}")
         kernel = kernel.view(1, 1, *kernel_shape)
 
     for i in range(1, num_labels + 1):
-        logger.debug(f'Creating flow-field for object {i} of {num_labels}...')
+        logger.debug(f"Creating flow-field for object {i} of {num_labels}...")
 
         # `slices` represents a bounding-box around the current object.
         object_mask = numpy.asarray(labelled_mask == i, dtype=numpy.uint8)
@@ -86,37 +290,45 @@ def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> num
         # Find the geometric median of the object.
         non_zero_indices = numpy.nonzero(object_mask)
         median_indices = tuple(map(int, map(numpy.median, non_zero_indices)))
-        median_index = numpy.argmin(sum(
-            (dim_index - median_index) ** 2
-            for dim_index, median_index in zip(non_zero_indices, median_indices)
-        ))
+        median_index = numpy.argmin(
+            sum(
+                (dim_index - median_index) ** 2
+                for dim_index, median_index in zip(non_zero_indices, median_indices)
+            )
+        )
         median = tuple(index[median_index] for index in non_zero_indices)
-        logger.debug(f'found geometric median at {median}...')
+        logger.debug(f"found geometric median at {median}...")
 
         # Run diffusion simulation
         object_heat = numpy.zeros_like(object_mask, dtype=numpy.float32)
         num_iterations = 2 * sum(s_dim.stop - s_dim.start + 1 for s_dim in slices)
-        logger.debug(f'Running diffusion with {num_iterations} iterations...')
+        logger.debug(f"Running diffusion with {num_iterations} iterations...")
         if device is None:
             for _ in range(num_iterations):
                 object_heat[median] += 1
-                object_heat = scipy.ndimage.convolve(object_heat, kernel, mode='constant')
+                object_heat = scipy.ndimage.convolve(
+                    object_heat, kernel, mode="constant"
+                )
                 object_heat *= object_mask
         else:
-            function = torch.nn.functional.conv2d if masks.ndim == 2 else torch.nn.functional.conv3d
+            function = (
+                torch.nn.functional.conv2d
+                if masks.ndim == 2
+                else torch.nn.functional.conv3d
+            )
 
             flame = numpy.zeros_like(object_heat)
             flame[median] += 1
-            flame = torch.tensor(flame, device=f'cuda:{device}')
+            flame = torch.tensor(flame, device=f"cuda:{device}")
             flame = flame.view(1, 1, *mask_shape)
-            object_heat = torch.tensor(object_heat, device=f'cuda:{device}')
+            object_heat = torch.tensor(object_heat, device=f"cuda:{device}")
             object_heat = object_heat.view(1, 1, *mask_shape)
-            object_mask = torch.tensor(object_mask, device=f'cuda:{device}')
+            object_mask = torch.tensor(object_mask, device=f"cuda:{device}")
             object_mask = object_mask.view(1, 1, *mask_shape)
 
             for _ in range(num_iterations):
                 object_heat += flame
-                object_heat = function(object_heat, kernel, padding='same')
+                object_heat = function(object_heat, kernel, padding="same")
                 object_heat *= object_mask
 
             object_heat = object_heat.cpu().numpy().squeeze()
@@ -124,7 +336,7 @@ def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> num
         # remove the padding and add final heat values to the full heat-map
         full_heat[slices] += object_heat[tuple([slice(1, -1, None)] * masks.ndim)]
 
-    logger.debug(f'finding gradients to store as flow-fields.')
+    logger.debug("finding gradients to store as flow-fields.")
     # calculate gradients along each axis
     gradients = list(numpy.gradient(full_heat))
     flows: numpy.ndarray = numpy.stack(gradients, axis=0)
@@ -134,14 +346,14 @@ def masks_to_flows(masks: numpy.ndarray, *, device: Optional[int] = None) -> num
     return flows
 
 
-@njit('float32[:,:,:], float32[:,:,:], uint32[:,:], uint32', nogil=True)
+@njit("float32[:,:,:], float32[:,:,:], uint32[:,:], uint32", nogil=True)
 def _euler_integration_2d(
-        locations: numpy.ndarray,
-        flows: numpy.ndarray,
-        indices: numpy.ndarray,
-        num_iterations: numpy.uint32,
+    locations: numpy.ndarray,
+    flows: numpy.ndarray,
+    indices: numpy.ndarray,
+    num_iterations: numpy.uint32,
 ):
-    """ Applies numerical integration of the given flows to find where each
+    """Applies numerical integration of the given flows to find where each
      pixel will converge.
 
     Args:
@@ -163,21 +375,23 @@ def _euler_integration_2d(
             curr_y, curr_x = int(locations[0, y, x]), int(locations[1, y, x])
             flow_y, flow_x = flows[0, curr_y, curr_x], flows[1, curr_y, curr_x]
             next_y, next_x = locations[0, y, x] - flow_y, locations[1, y, x] - flow_x
-            next_y, next_x = min(shape_y - 1, max(0, next_y)), min(shape_x - 1, max(0, next_x))
+            next_y, next_x = min(shape_y - 1, max(0, next_y)), min(
+                shape_x - 1, max(0, next_x)
+            )
 
             locations[0, y, x] = next_y
             locations[1, y, x] = next_x
     return locations
 
 
-@njit('float32[:,:,:,:], float32[:,:,:,:], uint32[:,:], uint32', nogil=True)
+@njit("float32[:,:,:,:], float32[:,:,:,:], uint32[:,:], uint32", nogil=True)
 def _euler_integration_3d(
-        locations: numpy.ndarray,
-        flows: numpy.ndarray,
-        indices: numpy.ndarray,
-        num_iterations: numpy.uint32,
+    locations: numpy.ndarray,
+    flows: numpy.ndarray,
+    indices: numpy.ndarray,
+    num_iterations: numpy.uint32,
 ):
-    """ Applies numerical integration of the given flows to find where each
+    """Applies numerical integration of the given flows to find where each
      pixel will converge.
 
     Args:
@@ -194,9 +408,21 @@ def _euler_integration_3d(
         for i in range(indices.shape[0]):
             z, y, x = indices[i, 0], indices[i, 1], indices[i, 2]
 
-            curr_z, curr_y, curr_x = int(locations[0, z, y, x]), int(locations[1, z, y, x]), int(locations[2, z, y, x])
-            flow_z, flow_y, flow_x = flows[0, curr_z, curr_y, curr_x], flows[1, curr_z, curr_y, curr_x], flows[2, curr_z, curr_y, curr_x]
-            next_z, next_y, next_x = locations[0, z, y, x] - flow_z, locations[1, z, y, x] - flow_y, locations[2, z, y, x] - flow_x
+            curr_z, curr_y, curr_x = (
+                int(locations[0, z, y, x]),
+                int(locations[1, z, y, x]),
+                int(locations[2, z, y, x]),
+            )
+            flow_z, flow_y, flow_x = (
+                flows[0, curr_z, curr_y, curr_x],
+                flows[1, curr_z, curr_y, curr_x],
+                flows[2, curr_z, curr_y, curr_x],
+            )
+            next_z, next_y, next_x = (
+                locations[0, z, y, x] - flow_z,
+                locations[1, z, y, x] - flow_y,
+                locations[2, z, y, x] - flow_x,
+            )
 
             next_z = min(shape_z - 1, max(0, next_z))
             next_y = min(shape_y - 1, max(0, next_y))
@@ -209,12 +435,12 @@ def _euler_integration_3d(
 
 
 def _interpolate_torch(
-        locations: numpy.ndarray,
-        flows: numpy.ndarray,
-        num_iterations: int,
-        device: int,
+    locations: numpy.ndarray,
+    flows: numpy.ndarray,
+    num_iterations: int,
+    device: int,
 ):
-    """ Runs follows 2d and 3d flows with interpolation using the indexed GPU.
+    """Runs follows 2d and 3d flows with interpolation using the indexed GPU.
 
     Args:
         locations: (2, Y, X)/(3, Z, Y, X) array of pixel locations. This starts
@@ -225,51 +451,58 @@ def _interpolate_torch(
         device: Index of GPU to by used.
     """
     ndims, shape = flows.shape[0], flows.shape[1:]
-    logger.debug(f'Interpolating flows of shape {shape} on GPU {device}...')
+    logger.debug(f"Interpolating flows of shape {shape} on GPU {device}...")
 
     # `locations` grid needs to be shaped (N, Y, X, 2)/(N, Z, Y, X, 3) for `grid_sample` method.
     indices_list = list(reversed(range(ndims)))
-    locations = torch.tensor(locations[indices_list].T, device=f'cuda:{device}', dtype=torch.float32)
+    locations = torch.tensor(
+        locations[indices_list].T, device=f"cuda:{device}", dtype=torch.float32
+    )
     locations = locations.view(1, *tuple(locations.shape))
     # `locations` needs to be in the [-1, 1] square/cube grid.
     for k in range(ndims):
-        locations[..., k] = (locations[..., k] / (shape[ndims - 1 - k] - 1))
+        locations[..., k] = locations[..., k] / (shape[ndims - 1 - k] - 1)
     locations = locations * 2 - 1
 
     # `flows` input needs to be shaped (N, C, Y, X)/(N, C, Z, Y, X) for `grid_sample` method.
-    flows = torch.tensor(flows[indices_list], device=f'cuda:{device}', dtype=torch.float32)
+    flows = torch.tensor(
+        flows[indices_list], device=f"cuda:{device}", dtype=torch.float32
+    )
     flows = flows.view(1, *tuple(flows.shape))
 
     for k in range(ndims):
-        flows[:, k, ...] /= (shape[ndims - 1 - k] - 1) / 2.
+        flows[:, k, ...] /= (shape[ndims - 1 - k] - 1) / 2.0
 
-    logger.debug(f'Following flows on GPU {device} for {num_iterations} steps...')
+    logger.debug(f"Following flows on GPU {device} for {num_iterations} steps...")
     for _ in range(num_iterations):
-        interpolated_flows = torch.nn.functional.grid_sample(flows, locations, align_corners=True)
+        interpolated_flows = torch.nn.functional.grid_sample(
+            flows, locations, align_corners=True
+        )
         for k in range(ndims):
             locations[..., k] = torch.clamp(
                 locations[..., k] - interpolated_flows[:, k, ...],
-                -1., 1.,
-                )
+                -1.0,
+                1.0,
+            )
 
     # rescale locations to (Z, Y, X) grid
     locations = (locations + 1) * 0.5
     for k in range(ndims):
         locations[..., k] = locations[..., k] * (shape[ndims - 1 - k] - 1)
 
-    logger.debug(f'moving converged locations to cpu...')
+    logger.debug("moving converged locations to cpu...")
     locations = locations[..., indices_list].cpu().numpy().squeeze().T
     return locations
 
 
-@njit('float32[:,:,:], float32[:], float32[:], float32[:,:]', nogil=True)
+@njit("float32[:,:,:], float32[:], float32[:], float32[:,:]", nogil=True)
 def _interpolate_flows_2d(
-        flows: numpy.ndarray,
-        y_indices: numpy.ndarray,
-        x_indices: numpy.ndarray,
-        interpolated_flows: numpy.ndarray,
+    flows: numpy.ndarray,
+    y_indices: numpy.ndarray,
+    x_indices: numpy.ndarray,
+    interpolated_flows: numpy.ndarray,
 ):
-    """ Follow flows using bilinear interpolation.
+    """Follow flows using bilinear interpolation.
 
     Args:
         flows: (2, Y, X) array of flows to follow
@@ -289,7 +522,9 @@ def _interpolate_flows_2d(
 
     for i in range(y_floor.shape[0]):
         # The top-left grid point (in matrix notation)
-        y0, x0 = min(shape_y - 1, max(0, y_floor[i])), min(shape_x - 1, max(0, x_floor[i]))
+        y0, x0 = min(shape_y - 1, max(0, y_floor[i])), min(
+            shape_x - 1, max(0, x_floor[i])
+        )
         # The bottom-right grid point
         y1, x1 = min(shape_y - 1, y0 + 1), min(shape_x - 1, x0 + 1)
         # The query point
@@ -297,24 +532,24 @@ def _interpolate_flows_2d(
 
         for channel in range(num_channels):
             interpolated_flows[channel, i] = (
-                flows[channel, y0, x0] * (1 - y) * (1 - x) +
-                flows[channel, y0, x1] * (1 - y) * x +
-                flows[channel, y1, x0] * y * (1 - x) +
-                flows[channel, y1, x1] * y * x
+                flows[channel, y0, x0] * (1 - y) * (1 - x)
+                + flows[channel, y0, x1] * (1 - y) * x
+                + flows[channel, y1, x0] * y * (1 - x)
+                + flows[channel, y1, x1] * y * x
             )
     return
 
 
 # noinspection PyUnusedLocal
-@njit('float32[:,:,:,:], float32[:], float32[:], float32[:], float32[:,:]', nogil=True)
+@njit("float32[:,:,:,:], float32[:], float32[:], float32[:], float32[:,:]", nogil=True)
 def _interpolate_flows_3d(
-        flows: numpy.ndarray,
-        z_indices: numpy.ndarray,
-        y_indices: numpy.ndarray,
-        x_indices: numpy.ndarray,
-        interpolated_flows: numpy.ndarray,
+    flows: numpy.ndarray,
+    z_indices: numpy.ndarray,
+    y_indices: numpy.ndarray,
+    x_indices: numpy.ndarray,
+    interpolated_flows: numpy.ndarray,
 ):
-    """ Follow flows using trilinear interpolation.
+    """Follow flows using trilinear interpolation.
 
     TODO: This function was a stretch goal for the sprint and has not yet been completed.
 
@@ -359,11 +594,11 @@ def _interpolate_flows_3d(
 
 
 def _interpolate_flows_cpu(
-        locations: numpy.ndarray,
-        flows: numpy.ndarray,
-        num_iterations: numpy.uint32,
+    locations: numpy.ndarray,
+    flows: numpy.ndarray,
+    num_iterations: numpy.uint32,
 ) -> numpy.ndarray:
-    """ Interpolate flows with the CPU using jit-compiled functions.
+    """Interpolate flows with the CPU using jit-compiled functions.
 
     Args:
         locations: Array of pixel indices where flows are to be interpolated
@@ -382,7 +617,7 @@ def _interpolate_flows_cpu(
             locations[axis] = numpy.clip(
                 locations[axis] - interpolated_flows[axis],
                 a_min=0,
-                a_max=shape[axis] - 1
+                a_max=shape[axis] - 1,
             )
     return locations
 
@@ -391,13 +626,13 @@ def _interpolate_flows_cpu(
 #  checking pixel locations against flow-magnitudes? Unlikely due to unit-norm
 #  of flows.
 def follow_flows(
-        flows: numpy.ndarray,
-        *,
-        num_iterations: Optional[int] = None,
-        interpolate: bool = True,
-        device: Optional[int] = None,
+    flows: numpy.ndarray,
+    *,
+    num_iterations: Optional[int] = None,
+    interpolate: bool = True,
+    device: Optional[int] = None,
 ) -> numpy.ndarray:
-    """ Run flow-field dynamics to recover masks in 2d and 3d.
+    """Run flow-field dynamics to recover masks in 2d and 3d.
 
     We initialize the pixel locations using a meshgrid and then follow the flow
     for each pixel location to find where it converges.
@@ -422,7 +657,7 @@ def follow_flows(
 
     # initialize pixel-locations to a meshgrid
     locations = numpy.asarray(
-        numpy.meshgrid(*(numpy.arange(d) for d in shape), indexing='ij'),
+        numpy.meshgrid(*(numpy.arange(d) for d in shape), indexing="ij"),
         dtype=numpy.float32,
     )
 
@@ -438,19 +673,25 @@ def follow_flows(
         if interpolate:
             query_indices = tuple(indices[:, dim] for dim in range(flows.ndim - 1))
             if flows.ndim == 3:
-                locations[:, query_indices[0], query_indices[1]] = _interpolate_flows_cpu(
+                locations[
+                    :, query_indices[0], query_indices[1]
+                ] = _interpolate_flows_cpu(
                     locations[:, query_indices[0], query_indices[1]],
                     flows,
                     num_iterations,
                 )
             else:
-                locations[:, query_indices[0], query_indices[1], query_indices[2]] = _interpolate_flows_cpu(
+                locations[
+                    :, query_indices[0], query_indices[1], query_indices[2]
+                ] = _interpolate_flows_cpu(
                     locations[:, query_indices[0], query_indices[1], query_indices[2]],
                     flows,
                     num_iterations,
                 )
         else:
-            function = _euler_integration_2d if flows.ndim == 3 else _euler_integration_3d
+            function = (
+                _euler_integration_2d if flows.ndim == 3 else _euler_integration_3d
+            )
             locations = function(locations, flows, indices, num_iterations)
     else:  # gpu
         locations = _interpolate_torch(locations, flows, num_iterations, device)
@@ -458,10 +699,10 @@ def follow_flows(
 
 
 def _compute_convergence_histograms(
-        locations: numpy.ndarray,
-        edge_padding: int,
+    locations: numpy.ndarray,
+    edge_padding: int,
 ) -> Tuple[List[numpy.ndarray], numpy.ndarray, numpy.ndarray]:
-    """ Compute nd-histograms of converged pixel locations.
+    """Compute nd-histograms of converged pixel locations.
 
     Args:
         locations: Array of pixel locations after following flows.
@@ -478,7 +719,7 @@ def _compute_convergence_histograms(
                                  locations of convergence.
     """
     ndims, masks_shape = locations.shape[0], locations.shape[1:]
-    logger.debug(f'computing convergence histograms...')
+    logger.debug("computing convergence histograms...")
 
     flattened_flows = [
         numpy.asarray(locations[dim], dtype=numpy.int32).flatten()
@@ -499,7 +740,7 @@ def _compute_convergence_histograms(
 
 
 def _compute_expansion_indices(ndims: int) -> numpy.ndarray:
-    """ Computes a (3, 3) or (3, 3, 3) array of difference in indices from a
+    """Computes a (3, 3) or (3, 3, 3) array of difference in indices from a
      pixel to its neighbors.
 
     Args:
@@ -508,15 +749,19 @@ def _compute_expansion_indices(ndims: int) -> numpy.ndarray:
     Returns:
         A nd-array of index differences.
     """
-    logger.debug(f'computing expansion indices...')
+    logger.debug("computing expansion indices...")
     expansion_indices = numpy.nonzero(numpy.ones(tuple([3] * ndims)))
-    expansion_indices = numpy.asarray([numpy.expand_dims(e, 1) for e in expansion_indices])
+    expansion_indices = numpy.asarray(
+        [numpy.expand_dims(e, 1) for e in expansion_indices]
+    )
     expansion_indices -= 1
     return expansion_indices
 
 
-def _compute_seed_indices(histogram: numpy.ndarray, max_histogram: numpy.ndarray) -> List[numpy.ndarray]:
-    """ Find the indices of the most frequently converged upon locations.
+def _compute_seed_indices(
+    histogram: numpy.ndarray, max_histogram: numpy.ndarray
+) -> List[numpy.ndarray]:
+    """Find the indices of the most frequently converged upon locations.
 
     Args:
         histogram: from `_compute_convergence_histograms`
@@ -527,11 +772,13 @@ def _compute_seed_indices(histogram: numpy.ndarray, max_histogram: numpy.ndarray
          indices of the seeds from which to start merging nearby convergent
          locations.
     """
-    logger.debug(f'computing seed indices...')
-    seeds = numpy.nonzero(numpy.logical_and(
-        histogram - max_histogram > -1e-6,
-        histogram > 10,
-    ))
+    logger.debug("computing seed indices...")
+    seeds = numpy.nonzero(
+        numpy.logical_and(
+            histogram - max_histogram > -1e-6,
+            histogram > 10,
+        )
+    )
 
     seed_frequencies = histogram[seeds]
     seed_sorting_indices = numpy.argsort(seed_frequencies)[::-1]
@@ -539,8 +786,10 @@ def _compute_seed_indices(histogram: numpy.ndarray, max_histogram: numpy.ndarray
     return list(numpy.asarray(seeds).transpose())
 
 
-def _get_masks_from_histograms(locations: numpy.ndarray, edge_padding: int) -> numpy.ndarray:
-    """ Uses nd-histograms, as per cellpose, to merge nearby convergent flows
+def _get_masks_from_histograms(
+    locations: numpy.ndarray, edge_padding: int
+) -> numpy.ndarray:
+    """Uses nd-histograms, as per cellpose, to merge nearby convergent flows
      and produce labelled masks.
 
     Does this work? See James 1:6.
@@ -560,16 +809,22 @@ def _get_masks_from_histograms(locations: numpy.ndarray, edge_padding: int) -> n
         Array of labelled masks.
     """
     ndims = int(locations.shape[0])
-    flattened_flows, histogram, spread_histogram = _compute_convergence_histograms(locations, edge_padding)
+    flattened_flows, histogram, spread_histogram = _compute_convergence_histograms(
+        locations, edge_padding
+    )
     expansion_indices = _compute_expansion_indices(ndims)
     seed_indices = _compute_seed_indices(histogram, spread_histogram)
-    logger.debug(f'using histograms to recover masks for {len(seed_indices)} convergent locations...')
+    logger.debug(
+        f"using histograms to recover masks for {len(seed_indices)} convergent locations..."
+    )
 
     seed_indices = list(map(list, seed_indices))
     for _ in range(5):
         for seed_index in range(len(seed_indices)):
             expanded_pixel_indices = [
-                numpy.asarray(e[:] + numpy.expand_dims(seed_indices[seed_index][dim], 0)).flatten()
+                numpy.asarray(
+                    e[:] + numpy.expand_dims(seed_indices[seed_index][dim], 0)
+                ).flatten()
                 for dim, e in enumerate(expansion_indices)
             ]
             is_index_in_mask = [
@@ -583,14 +838,16 @@ def _get_masks_from_histograms(locations: numpy.ndarray, edge_padding: int) -> n
 
             # remove all expanded pixels that are not in the mask and all pixels where
             # 2 or less other pixels converged after following flows
-            expanded_pixel_indices = tuple((
-                pixels[is_index_in_mask] for pixels in expanded_pixel_indices
-            ))
+            expanded_pixel_indices = tuple(
+                (pixels[is_index_in_mask] for pixels in expanded_pixel_indices)
+            )
             did_enough_flows_converge = histogram[expanded_pixel_indices] > 2
 
             # expand the each seed to the pixels where other pixels converged.
             for dim in range(ndims):
-                seed_indices[seed_index][dim] = expanded_pixel_indices[dim][did_enough_flows_converge]
+                seed_indices[seed_index][dim] = expanded_pixel_indices[dim][
+                    did_enough_flows_converge
+                ]
     seed_indices = list(map(tuple, seed_indices))
 
     # apply labels to centers
@@ -605,12 +862,12 @@ def _get_masks_from_histograms(locations: numpy.ndarray, edge_padding: int) -> n
 
 
 def _remove_bad_flow_masks(
-        masks: numpy.ndarray,
-        flows: numpy.ndarray,
-        flow_error_threshold: float,
-        device: Optional[int],
+    masks: numpy.ndarray,
+    flows: numpy.ndarray,
+    flow_error_threshold: float,
+    device: Optional[int],
 ) -> numpy.ndarray:
-    """ Remove masked objects whose recreated flows have high error.
+    """Remove masked objects whose recreated flows have high error.
 
     We begin by recreating the flows from the masks we just computed. These
      flows are compared against the flows given by the user. If the error (MSE)
@@ -627,7 +884,9 @@ def _remove_bad_flow_masks(
     Returns:
         Labelled masks which have low flow error.
     """
-    logger.debug(f'removing bad flows with error higher than {flow_error_threshold:.2e}...')
+    logger.debug(
+        f"removing bad flows with error higher than {flow_error_threshold:.2e}..."
+    )
     reconstructed_flows = masks_to_flows(masks, device=device)
 
     # difference between predicted flows vs mask flows
@@ -645,8 +904,10 @@ def _remove_bad_flow_masks(
     return masks
 
 
-def fill_holes_and_remove_small_masks(masks: numpy.ndarray, min_size: int = 15) -> numpy.ndarray:
-    """ Discard masks smaller than `min_size` and fill any holes inside masks.
+def fill_holes_and_remove_small_masks(
+    masks: numpy.ndarray, min_size: int = 15
+) -> numpy.ndarray:
+    """Discard masks smaller than `min_size` and fill any holes inside masks.
 
     Holes are filled using scipy.ndimage.binary_fill_holes.
 
@@ -681,16 +942,16 @@ def fill_holes_and_remove_small_masks(masks: numpy.ndarray, min_size: int = 15) 
 
 
 def get_masks(
-        locations: numpy.ndarray,
-        *,
-        is_cell: Optional[numpy.ndarray] = None,
-        edge_padding: int = 20,
-        flows: Optional[numpy.ndarray] = None,
-        flow_error_threshold: Optional[float] = 0.4,
-        mask_size_threshold: Optional[float] = None,
-        device: Optional[int] = None,
+    locations: numpy.ndarray,
+    *,
+    is_cell: Optional[numpy.ndarray] = None,
+    edge_padding: int = 20,
+    flows: Optional[numpy.ndarray] = None,
+    flow_error_threshold: Optional[float] = 0.4,
+    mask_size_threshold: Optional[float] = None,
+    device: Optional[int] = None,
 ) -> numpy.ndarray:
-    """ Create masks from the convergent pixel locations after following flows.
+    """Create masks from the convergent pixel locations after following flows.
 
     Args:
         locations: (2, Y, X) or (3, Z, Y, X) array of converged pixel locations.
@@ -709,13 +970,12 @@ def get_masks(
         Array of labelled masks shaped (Y, X) or (Z, Y, X).
     """
     ndims, shape = locations.shape[0], locations.shape[1:]
-    logger.debug(f'recovering masks of shape {shape}...')
+    logger.debug(f"recovering masks of shape {shape}...")
 
     # pixels that are not in a cell are to remain where they start.
     if is_cell is not None:
         indices = numpy.meshgrid(
-            *(numpy.arange(shape[dim]) for dim in range(ndims)),
-            indexing='ij'
+            *(numpy.arange(shape[dim]) for dim in range(ndims)), indexing="ij"
         )
         for dim in range(ndims):
             locations[dim, ~is_cell] = indices[dim][~is_cell]
@@ -731,16 +991,18 @@ def get_masks(
             masks[masks == label] = 0
 
     labels, masks = numpy.unique(masks, return_inverse=True)
-    logger.debug(f'Recovered {len(labels)} masks...')
+    logger.debug(f"Recovered {len(labels)} masks...")
     masks = numpy.reshape(masks, shape)
 
     # If the original flows are given, use them to remove masks with a high flow-error.
-    if len(labels) > 0 and flow_error_threshold is not None and flow_error_threshold > 0 and flows is not None:
+    if (
+        len(labels) > 0
+        and flow_error_threshold is not None
+        and flow_error_threshold > 0
+        and flows is not None
+    ):
         masks = _remove_bad_flow_masks(masks, flows, flow_error_threshold, device)
         _, masks = numpy.unique(masks, return_inverse=True)
-        masks = numpy.asarray(
-            numpy.reshape(masks, shape),
-            dtype=numpy.uint32
-        )
+        masks = numpy.asarray(numpy.reshape(masks, shape), dtype=numpy.uint32)
 
     return masks
