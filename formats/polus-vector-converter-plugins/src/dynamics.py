@@ -2,9 +2,18 @@ import logging
 from typing import List
 from typing import Optional
 from typing import Tuple
+from typing import Iterator
+from concurrent.futures import ThreadPoolExecutor
+
+try:
+    import cupy
+
+    HAS_CUDA = cupy.cuda.runtime.getDeviceCount() > 0
+
+except ModuleNotFoundError:
+    HAS_CUDA = False
 
 import numpy
-import cupy
 import scipy.ndimage.measurements
 import torch.nn.functional
 from numba import njit
@@ -20,6 +29,18 @@ logger.setLevel(utils.POLUS_LOG)
 
 
 def geometric_median(mask: numpy.ndarray) -> numpy.ndarray:
+    """Calculate the geometric median for a mask
+
+    The geometric median is the data point closest to the median, ensuring that the
+    median value coincides with an actual data point. This is accomplished by finding
+    the point with the smallest euclidian distance from the standard median.
+
+    Args:
+        mask (numpy.ndarray): A binary mask
+
+    Returns:
+        numpy.ndarray: The coordinates of the geometric median.
+    """
 
     # Get the geometric median of the object
     non_zero_indices = numpy.argwhere(mask)
@@ -31,26 +52,50 @@ def geometric_median(mask: numpy.ndarray) -> numpy.ndarray:
 
 def stack_rois(
     image: numpy.ndarray, slices: List[Tuple[slice, slice]]
-) -> Tuple[numpy.ndarray, numpy.ndarray]:
+) -> Iterator[Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]]:
+    """Stack multiple ROIs into a single n-d array
 
-    max_pixels = 4 * utils.TILE_SIZE ** 2
+    This function stacks all ROIs along the 0th dimension such that the centroid of each
+    object occurs at the same higher dimensional coordinates. For example, in the case
+    of 2-dimensional images, the `image` is the original image and `slices` is a list
+    of slices indicating which objects to stack. If there are N objects, then the
+    centroid will occur at [:,Y,X], where [Y,X] is the centroid for every object where
+    [0,:,:] is the first object, [1,:,:] is the second object, etc.
+
+    To help conserve memory, this function is a generator. Each iteration will yield
+    roughly 1/4 the square TILE_SIZE number of pixels.
+
+    Args:
+        image (numpy.ndarray): A labeled image
+        slices (List[Tuple[slice, slice]]): A list of slices, one for each ROI.
+
+    Yields:
+        Iterator[Tuple[numpy.ndarray, numpy.ndarray]]: [description]
+    """
+
+    # Set the maximum number of pixels to process at a time
+    max_pixels = 0.25 * utils.TILE_SIZE ** 2
     current_label = 0
 
+    # Outermost loop, resets values for next generation
     while current_label < len(slices):
 
         masks = []
         extents = []
-        total_pixels = 0
-        max_slice_pixels = 0
+        total_pixels = 0  # Total number of pixels in current generation
+        max_slice_pixels = 0  # width*height of the largest ROI in the generation
 
+        # Stack a set of ROIs for the current generation
         while total_pixels < max_pixels and current_label < len(slices):
 
             # Create the mask and append to the list of masks
             mask = image[slices[current_label]] == (current_label + 1)
 
+            # Check if the current ROI is larger than the largest ROI
             current_size = mask.size
             if current_size > max_slice_pixels:
 
+                # If the current ROI would give too many pixels, load it next iteration
                 if current_size * len(masks) > max_pixels:
                     break
 
@@ -71,13 +116,16 @@ def stack_rois(
             current_label += 1
             total_pixels = max_slice_pixels * len(masks)
 
+        # Calculate the size of output needed to store all ROIs with the same centroid
         extents = numpy.asarray(extents).astype(int)
         centroid = -numpy.min(extents[:, :2], axis=0) + 2
         shape = numpy.max(extents[:, 2:], axis=0) + centroid + 1
 
+        # Calculate offsets for each ROI to position the centroid at the same location
         extents[:, :2] += centroid
         extents[:, 2:] += centroid
 
+        # Create the output, and stack the ROIs
         stack = numpy.zeros(
             [len(masks)] + shape.astype(int).tolist(), dtype=numpy.bool_
         )
@@ -96,42 +144,78 @@ def stack_rois(
 
 
 def creeping_mean_filter(
-    stack: numpy.ndarray, centroid: numpy.ndarray
+    stack: numpy.ndarray, centroid: numpy.ndarray, label_count: int
 ) -> numpy.ndarray:
+    """Integral image based diffusion
+
+    This function uses integral images to simulate diffusion using mean filters. The
+    creeping component has to do with how the integral images are generated on each
+    iteration. A flame is applied to the centroid location on each iteration. On the
+    first iteration, it is only possible for pixels in the 3x3 region centered on the
+    flame to have heat diffusion occur. Therefore, the first iteration only applies
+    the integral image to the first 3x3 set of pixels around the centroid. The next
+    iteration "creeps" the boundary outward by one pixel in all directions, so that the
+    integral image is only applied to a 5x5 set of pixels centered on the flame. The
+    creeping boundaries stop expanding once they hit the outer limits of the ROI stack.
+
+    Every 10 iterations, a check is run to determine which ROIs have completed. This is
+    helpful when one ROI is significantly larger than other ROIs.
+
+    Diffusion is considered complete when all pixels in a mask have non-zero heat values
+    or when the creep reaches the
+
+    Args:
+        stack (numpy.ndarray): A stack of ROIs
+        centroid (numpy.ndarray): The centroid for all ROIs in the stack
+
+    Returns:
+        numpy.ndarray: An image stack, where each slice represents the heat contained in
+            each pixel after diffusion
+    """
 
     assert centroid.size == stack.ndim - 1
 
-    start_index = numpy.vstack((centroid - 3, numpy.zeros((centroid.size,)))).astype(
-        int
-    )
-    end_index = numpy.vstack((centroid + 3, numpy.asarray((stack.shape[1:],)))).astype(
-        int
-    )
+    if HAS_CUDA:
+        xp = cupy
+        stack = xp.asarray(stack)
+    else:
+        xp = numpy
+
+    start_index = xp.vstack((centroid - 3, xp.zeros((centroid.size,)))).astype(int)
+    end_index = xp.vstack((centroid + 3, xp.asarray((stack.shape[1:],)))).astype(int)
 
     background = ~stack
-    output = numpy.zeros(stack.shape, dtype=numpy.float32)
+    output = xp.zeros(stack.shape, dtype=xp.float32)
+    old_mask = xp.zeros(stack.shape, dtype=xp.bool_)
 
-    incomplete = numpy.ones((stack.shape[0],), dtype=bool)
+    incomplete = xp.ones((stack.shape[0],), dtype=bool)
     slices = [slice(None) for _ in range(stack.ndim)]
     subslices = [slice(None) for _ in range(stack.ndim)]
 
-    slices[0] = incomplete
-    subslices[0] = incomplete
+    if HAS_CUDA:
+        slices[0] = slice(None)
+        subslices[0] = slice(None)
+    else:
+        slices[0] = incomplete
+        subslices[0] = incomplete
     flame_index = (incomplete,) + tuple(centroid.tolist())
 
     iteration = 0
 
-    while numpy.any(numpy.diff(start_index, axis=0) <= 0) or numpy.any(
-        numpy.diff(end_index, axis=0) >= 0
-    ):
+    # Loop until diffusion is complete
+    while True:
 
+        # Define the starting and stopping indices
         for i, (s, e) in enumerate(
-            zip(numpy.max(start_index, axis=0), numpy.min(end_index, axis=0))
+            zip(xp.max(start_index, axis=0), xp.min(end_index, axis=0))
         ):
+            # Indices for performing integral image calculations
+            slices[i + 1] = slice(int(s), int(e), 1)
 
-            slices[i + 1] = slice(s, e)
-            subslices[i + 1] = slice(s + 2, e - 1)
+            # Indices for referencing back to original points
+            subslices[i + 1] = slice(int(s + 2), int(e - 1), 1)
 
+        # Create tuples for indexing
         slices_tuple = tuple(slices)
         subslices_tuple = tuple(subslices)
 
@@ -139,10 +223,11 @@ def creeping_mean_filter(
         end_index[0] += 1
 
         # Fuel the flame
-        output[flame_index] += 1
+        output[flame_index] += utils.DIFF_FUEL
 
         # Apply the mean filter using the integral image
-        integral_image = output[slices_tuple].cumsum(axis=1).cumsum(axis=2)
+        integral_image = output[slices_tuple]
+        integral_image = integral_image.cumsum(axis=1).cumsum(axis=2)
         mean_filt = (
             integral_image[:, 3:, 3:]
             - integral_image[:, 3:, :-3]
@@ -150,23 +235,88 @@ def creeping_mean_filter(
             + integral_image[:, :-3, :-3]
         ) / 9
 
+        b = background[subslices_tuple]
+        mean_filt[b] = 0
         output[subslices_tuple] = mean_filt
-        output[background] = 0
 
         if (iteration % 10) == 0:
 
-            incomplete &= (
-                ~numpy.all(stack == (output > 0), axis=(1, 2))
-                .squeeze()
-                .astype(numpy.bool_)
-            )
+            mask = output > utils.DIFF_SMOLDER
 
+            # In place binary operation to update list of incomplete ROIs
+            # slices/subslices reference incomplete, changing the ROIs processed
+            incomplete &= ~xp.all(stack == mask, axis=(1, 2)).squeeze().astype(xp.bool_)
+
+            # If nothing is incomplete, everything is finished
             if ~incomplete.any():
                 break
+
+            # Shock the system, accelerates diffusion and prevents stalling
+
+            output[mask] += utils.DIFF_SHOCK
+            output[~mask] = 0
+
+            if xp.all(old_mask[mask]):
+                incomplete_args = xp.argwhere(incomplete)
+
+                logger.warning(
+                    f"Diffusion stalled for objects ({label_count + incomplete_args.squeeze()}) at iteration {iteration}. Check output for accuracy."
+                )
+
+                break
+
+            old_mask |= mask
+
+            # Check to see if we can shrink the size of the integral image
+            indices = xp.any(mask[incomplete], axis=0)
+
+            for i in range(start_index.shape[1]):
+
+                axis_indices = xp.any(
+                    indices,
+                    axis=tuple(j for j in range(start_index.shape[1]) if j != i),
+                )
+                axis_indices = xp.argwhere(axis_indices).squeeze()
+
+                start_index[0, i] = axis_indices[0] - 3
+                end_index[0, i] = axis_indices[-1] + 3
 
         iteration += 1
 
     return output
+
+
+def gradient_store(
+    stack: numpy.ndarray,
+    slices: List[Tuple[slice, slice]],
+    subslices: List[Tuple[slice, slice]],
+    centroid: numpy.ndarray,
+    sc: int,
+    output: numpy.ndarray,
+) -> None:
+
+    if HAS_CUDA:
+        xp = cupy
+        stack = xp.asarray(stack)
+    else:
+        xp = numpy
+
+    heat_slices = creeping_mean_filter(stack, centroid, sc)
+
+    vector_slices = list(xp.gradient(heat_slices, axis=(1, 2)))
+    vector_slices = xp.stack(vector_slices, axis=3)
+    vector_slices = vector_slices / (
+        xp.linalg.norm(vector_slices, axis=3)[..., xp.newaxis]
+        + xp.finfo(xp.float32).eps
+    )
+    vector_slices[~stack] = 0
+
+    if HAS_CUDA:
+        vector_slices = xp.asnumpy(vector_slices)
+
+    for i, s in enumerate(vector_slices):
+
+        output[slices[sc + i]] += s[subslices[i]]
 
 
 def masks_to_vectors(masks: numpy.ndarray) -> numpy.ndarray:
@@ -194,156 +344,25 @@ def masks_to_vectors(masks: numpy.ndarray) -> numpy.ndarray:
 
     vector = numpy.zeros(masks.shape + (2,), dtype=numpy.float32)
 
-    for stack, subslices, centroid in stack_rois(labels, slices):
+    threads = []
+    with ThreadPoolExecutor() as executor:
+        for stack, subslices, centroid in stack_rois(labels, slices):
 
-        heat_slices = creeping_mean_filter(stack, centroid)
+            threads.append(
+                executor.submit(
+                    gradient_store, stack, slices, subslices, centroid, sc, vector
+                )
+            )
+            # gradient_store(stack, slices, subslices, centroid, sc, vector)
 
-        vector_slices = list(numpy.gradient(heat_slices, axis=(1, 2)))
-        vector_slices = numpy.stack(vector_slices, axis=3)
-        # vector_slices = vector_slices / (
-        #     numpy.linalg.norm(vector_slices, axis=3)[..., numpy.newaxis]
-        #     + numpy.finfo(numpy.float32).eps
-        # )
-        # vector_slices[~stack] = 0
+            sc += stack.shape[0]
 
-        for i, s in enumerate(vector_slices):
-
-            vector[slices[sc + i]] += s[subslices[i]]
-
-        sc += heat_slices.shape[0]
+    for thread in threads:
+        thread.result()
 
     vector = vector.transpose(2, 0, 1)
 
     return vector
-
-
-def masks_to_flows(
-    masks: numpy.ndarray, *, device: Optional[int] = None
-) -> numpy.ndarray:
-    """Convert masks to flows using diffusion from the pixel at the
-     geometric-median of each masked object.
-
-     We use convolutions on each object to simulate heat diffusion. With each
-      iteration through the diffusion simulation, we inject head at the
-      geometric median of the object. We then accumulate the heat-density map
-      for the full image. The flows are the gradients of the heat-map. These
-      gradients are normalized to have unit-norm.
-
-    Args:
-        masks: A 2d/3d numpy array (uint) containing labelled masks.
-                The axes are assumed to be ordered as (y, x) or (z, y, x).
-        device: None if not using a gpu, otherwise the index of the gpu to use.
-
-    Returns:
-        A 3d/4d numpy array (float32) representing the flow vectors.
-        For 2d masks of shape (Y, X) the flows have shape (2, Y, X).
-        For 3d masks of shape (Z, Y, X) the flows have shape (3, Z, Y, X).
-        The 0th axis represents flow values ordered as (y, x) or (z, y, x).
-    """
-
-    if masks.ndim not in [2, 3]:
-        message = f"Masks must be 2d or 3d. Got {int(masks.ndim)}d instead."
-        logger.error(message)
-        raise ValueError(message)
-
-    # ensure unique and contiguous labels
-    uniques, inverse = numpy.unique(masks, return_inverse=True)
-    if len(uniques) == 1:
-        if uniques[0] == 0:
-            logger.warning("No objects found. Returning zero flows.")
-        else:
-            logger.warning(
-                "The masked tile/chunk contains one object and no "
-                "background pixels. Returning zero flows."
-            )
-        return numpy.zeros(shape=(masks.ndim, *masks.shape), dtype=numpy.float32)
-    clean_masks = numpy.reshape(inverse, masks.shape)
-
-    labelled_mask = clean_masks
-    num_labels = numpy.max(clean_masks)
-
-    logger.debug(f"Creating flow-fields for {num_labels} masks.")
-
-    # We will run the diffusion simulation on each object in turn. This saves a
-    # a lot of time by avoiding needless calculations for empty regions of the image.
-    full_heat: numpy.ndarray = numpy.zeros_like(clean_masks, dtype=numpy.float32)
-
-    # convolutional kernel to use for diffusion simulation
-    kernel_shape = tuple([3] * clean_masks.ndim)
-    kernel = numpy.ones(shape=kernel_shape, dtype=numpy.float32)
-    kernel /= kernel.sum()
-    if device is not None:
-        kernel = torch.tensor(kernel, device=f"cuda:{device}")
-        kernel = kernel.view(1, 1, *kernel_shape)
-
-    for i in range(1, num_labels + 1):
-        logger.debug(f"Creating flow-field for object {i} of {num_labels}...")
-
-        # `slices` represents a bounding-box around the current object.
-        object_mask = numpy.asarray(labelled_mask == i, dtype=numpy.uint8)
-        [slices] = scipy.ndimage.find_objects(object_mask)
-
-        # isolate the object and add padding to mitigate the boundary effects of convolutions.
-        object_mask = numpy.pad(object_mask[slices], pad_width=1)
-        mask_shape = object_mask.shape
-
-        # Find the geometric median of the object.
-        non_zero_indices = numpy.nonzero(object_mask)
-        median_indices = tuple(map(int, map(numpy.median, non_zero_indices)))
-        median_index = numpy.argmin(
-            sum(
-                (dim_index - median_index) ** 2
-                for dim_index, median_index in zip(non_zero_indices, median_indices)
-            )
-        )
-        median = tuple(index[median_index] for index in non_zero_indices)
-        logger.debug(f"found geometric median at {median}...")
-
-        # Run diffusion simulation
-        object_heat = numpy.zeros_like(object_mask, dtype=numpy.float32)
-        num_iterations = 2 * sum(s_dim.stop - s_dim.start + 1 for s_dim in slices)
-        logger.debug(f"Running diffusion with {num_iterations} iterations...")
-        if device is None:
-            for _ in range(num_iterations):
-                object_heat[median] += 1
-                object_heat = scipy.ndimage.convolve(
-                    object_heat, kernel, mode="constant"
-                )
-                object_heat *= object_mask
-        else:
-            function = (
-                torch.nn.functional.conv2d
-                if masks.ndim == 2
-                else torch.nn.functional.conv3d
-            )
-
-            flame = numpy.zeros_like(object_heat)
-            flame[median] += 1
-            flame = torch.tensor(flame, device=f"cuda:{device}")
-            flame = flame.view(1, 1, *mask_shape)
-            object_heat = torch.tensor(object_heat, device=f"cuda:{device}")
-            object_heat = object_heat.view(1, 1, *mask_shape)
-            object_mask = torch.tensor(object_mask, device=f"cuda:{device}")
-            object_mask = object_mask.view(1, 1, *mask_shape)
-
-            for _ in range(num_iterations):
-                object_heat += flame
-                object_heat = function(object_heat, kernel, padding="same")
-                object_heat *= object_mask
-
-            object_heat = object_heat.cpu().numpy().squeeze()
-
-        # remove the padding and add final heat values to the full heat-map
-        full_heat[slices] += object_heat[tuple([slice(1, -1, None)] * masks.ndim)]
-
-    logger.debug("finding gradients to store as flow-fields.")
-    # calculate gradients along each axis
-    gradients = list(numpy.gradient(full_heat))
-    flows: numpy.ndarray = numpy.stack(gradients, axis=0)
-
-    # Normalize gradients
-    flows = (flows / (numpy.linalg.norm(flows, axis=0) + 1e-20)) * (clean_masks != 0)
-    return flows
 
 
 @njit("float32[:,:,:], float32[:,:,:], uint32[:,:], uint32", nogil=True)

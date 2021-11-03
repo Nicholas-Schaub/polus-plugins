@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy
 
-# import torch
+import torch
 
 POLUS_LOG = getattr(logging, os.environ.get("POLUS_LOG", "INFO"))
 POLUS_EXT = os.environ.get("POLUS_EXT", ".ome.tif")
@@ -17,6 +17,14 @@ NUM_THREADS = len(DEVICES) if USE_GPU else max(1, cpu_count() - 1)
 
 TILE_SIZE = 2048
 TILE_OVERLAP = 64
+
+# Diffusion parameters
+DIFF_FUEL = 1.0  # Amount of fuel to add to the flame on each iteration
+DIFF_SMOLDER = 0.00001  # Heat threshold for zeroing out values every 10 iterations
+
+# Heat shock to add to all non-zero points every 10 iterations
+# Increasing this value permits heat to fill narrower regions
+DIFF_SHOCK = 0.01
 
 
 def replace_extension(file: Path, *, extension: str = None) -> str:
