@@ -10,10 +10,9 @@ import torch
 POLUS_LOG = getattr(logging, os.environ.get("POLUS_LOG", "INFO"))
 POLUS_EXT = os.environ.get("POLUS_EXT", ".ome.tif")
 
-# USE_GPU = torch.cuda.is_available()
-USE_GPU = False
+USE_GPU = torch.cuda.is_available()
 DEVICES = list(range(torch.cuda.device_count())) if USE_GPU else None
-NUM_THREADS = len(DEVICES) if USE_GPU else max(1, cpu_count() - 1)
+NUM_THREADS = max(1, (3 * cpu_count()) // 4)
 
 TILE_SIZE = 2048
 TILE_OVERLAP = 64

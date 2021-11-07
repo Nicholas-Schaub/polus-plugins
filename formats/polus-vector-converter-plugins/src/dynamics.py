@@ -3,17 +3,10 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 from typing import Iterator
-from concurrent.futures import ThreadPoolExecutor
-
-try:
-    import cupy
-
-    HAS_CUDA = cupy.cuda.runtime.getDeviceCount() > 0
-
-except ModuleNotFoundError:
-    HAS_CUDA = False
+from concurrent.futures import ThreadPoolExecutor, wait, as_completed
 
 import numpy
+from numpy.core.fromnumeric import ndim
 import scipy.ndimage.measurements
 import torch.nn.functional
 from numba import njit
@@ -76,6 +69,7 @@ def stack_rois(
     # Set the maximum number of pixels to process at a time
     max_pixels = 0.25 * utils.TILE_SIZE ** 2
     current_label = 0
+    dims = image.ndim
 
     # Outermost loop, resets values for next generation
     while current_label < len(slices):
@@ -106,9 +100,9 @@ def stack_rois(
             geo_median = geometric_median(mask)
 
             # Calculate the extents of the region relative to the median
-            extent = numpy.zeros((4,))
-            extent[:2] = -geo_median
-            extent[2:] = mask.shape - geo_median
+            extent = numpy.zeros((2 * dims,))
+            extent[:dims] = -geo_median
+            extent[dims:] = mask.shape - geo_median
 
             masks.append(mask)
             extents.append(extent)
@@ -118,12 +112,12 @@ def stack_rois(
 
         # Calculate the size of output needed to store all ROIs with the same centroid
         extents = numpy.asarray(extents).astype(int)
-        centroid = -numpy.min(extents[:, :2], axis=0) + 2
-        shape = numpy.max(extents[:, 2:], axis=0) + centroid + 1
+        centroid = -numpy.min(extents[:, :dims], axis=0) + 2
+        shape = numpy.max(extents[:, dims:], axis=0) + centroid + 1
 
         # Calculate offsets for each ROI to position the centroid at the same location
-        extents[:, :2] += centroid
-        extents[:, 2:] += centroid
+        extents[:, :dims] += centroid
+        extents[:, dims:] += centroid
 
         # Create the output, and stack the ROIs
         stack = numpy.zeros(
@@ -136,11 +130,43 @@ def stack_rois(
 
             ext = extents[i]
 
-            sub_slices.append((slice(ext[0], ext[2]), slice(ext[1], ext[3])))
+            slice_tuple = tuple(slice(ext[i], ext[i + dims]) for i in range(dims))
 
-            stack[(i,) + sub_slices[-1]] = mask
+            sub_slices.append(slice_tuple)
+
+            stack[(i,) + slice_tuple] = mask
 
         yield stack, sub_slices, centroid
+
+
+def mean_filt_2d(image):
+
+    integral_image = image.cumsum(axis=1).cumsum(axis=2)
+    mean_filt = (
+        integral_image[:, 3:, 3:]
+        - integral_image[:, 3:, :-3]
+        - integral_image[:, :-3, 3:]
+        + integral_image[:, :-3, :-3]
+    ) / 9
+
+    return mean_filt
+
+
+def mean_filt_3d(image):
+
+    integral_image = image.cumsum(axis=1).cumsum(axis=2).cumsum(axis=3)
+    mean_filt = (
+        integral_image[:, 3:, 3:, 3:]
+        + integral_image[:, 3:, :-3, :-3]
+        + integral_image[:, :-3, 3:, :-3]
+        + integral_image[:, :-3, :-3, 3:]
+        - integral_image[:, :-3, :-3, :-3]
+        - integral_image[:, :-3, 3:, 3:]
+        - integral_image[:, 3:, :-3, 3:]
+        - integral_image[:, 3:, 3:, :-3]
+    ) / 27
+
+    return mean_filt
 
 
 def creeping_mean_filter(
@@ -175,29 +201,26 @@ def creeping_mean_filter(
 
     assert centroid.size == stack.ndim - 1
 
-    if HAS_CUDA:
-        xp = cupy
-        stack = xp.asarray(stack)
-    else:
-        xp = numpy
+    start_index = numpy.vstack((centroid - 3, numpy.zeros((centroid.size,)))).astype(
+        int
+    )
+    end_index = numpy.vstack((centroid + 3, numpy.asarray((stack.shape[1:],)))).astype(
+        int
+    )
 
-    start_index = xp.vstack((centroid - 3, xp.zeros((centroid.size,)))).astype(int)
-    end_index = xp.vstack((centroid + 3, xp.asarray((stack.shape[1:],)))).astype(int)
+    mean_filt = mean_filt_2d if stack.ndim == 3 else mean_filt_3d
+    axes = tuple(range(1, stack.ndim))
 
     background = ~stack
-    output = xp.zeros(stack.shape, dtype=xp.float32)
-    old_mask = xp.zeros(stack.shape, dtype=xp.bool_)
+    output = numpy.zeros(stack.shape, dtype=numpy.float32)
+    old_mask = numpy.zeros(stack.shape, dtype=numpy.bool_)
 
-    incomplete = xp.ones((stack.shape[0],), dtype=bool)
+    incomplete = numpy.ones((stack.shape[0],), dtype=bool)
     slices = [slice(None) for _ in range(stack.ndim)]
     subslices = [slice(None) for _ in range(stack.ndim)]
 
-    if HAS_CUDA:
-        slices[0] = slice(None)
-        subslices[0] = slice(None)
-    else:
-        slices[0] = incomplete
-        subslices[0] = incomplete
+    slices[0] = incomplete
+    subslices[0] = incomplete
     flame_index = (incomplete,) + tuple(centroid.tolist())
 
     iteration = 0
@@ -207,7 +230,7 @@ def creeping_mean_filter(
 
         # Define the starting and stopping indices
         for i, (s, e) in enumerate(
-            zip(xp.max(start_index, axis=0), xp.min(end_index, axis=0))
+            zip(numpy.max(start_index, axis=0), numpy.min(end_index, axis=0))
         ):
             # Indices for performing integral image calculations
             slices[i + 1] = slice(int(s), int(e), 1)
@@ -226,18 +249,11 @@ def creeping_mean_filter(
         output[flame_index] += utils.DIFF_FUEL
 
         # Apply the mean filter using the integral image
-        integral_image = output[slices_tuple]
-        integral_image = integral_image.cumsum(axis=1).cumsum(axis=2)
-        mean_filt = (
-            integral_image[:, 3:, 3:]
-            - integral_image[:, 3:, :-3]
-            - integral_image[:, :-3, 3:]
-            + integral_image[:, :-3, :-3]
-        ) / 9
+        heat = mean_filt(output[slices_tuple])
 
         b = background[subslices_tuple]
-        mean_filt[b] = 0
-        output[subslices_tuple] = mean_filt
+        heat[b] = 0
+        output[subslices_tuple] = heat
 
         if (iteration % 10) == 0:
 
@@ -245,38 +261,40 @@ def creeping_mean_filter(
 
             # In place binary operation to update list of incomplete ROIs
             # slices/subslices reference incomplete, changing the ROIs processed
-            incomplete &= ~xp.all(stack == mask, axis=(1, 2)).squeeze().astype(xp.bool_)
+            incomplete &= (
+                ~numpy.all(stack == mask, axis=axes).squeeze().astype(numpy.bool_)
+            )
 
             # If nothing is incomplete, everything is finished
             if ~incomplete.any():
                 break
 
-            # Shock the system, accelerates diffusion and prevents stalling
+            # Return if diffusion has stalled
+            if numpy.all(old_mask[mask]):
+                incomplete_args = numpy.argwhere(incomplete)
 
-            output[mask] += utils.DIFF_SHOCK
-            output[~mask] = 0
-
-            if xp.all(old_mask[mask]):
-                incomplete_args = xp.argwhere(incomplete)
-
-                logger.warning(
+                logger.debug(
                     f"Diffusion stalled for objects ({label_count + incomplete_args.squeeze()}) at iteration {iteration}. Check output for accuracy."
                 )
 
                 break
 
+            # Shock the system, accelerates diffusion and prevents stalling
+            output[mask] += utils.DIFF_SHOCK
+            output[~mask] = 0
+
             old_mask |= mask
 
             # Check to see if we can shrink the size of the integral image
-            indices = xp.any(mask[incomplete], axis=0)
+            indices = numpy.any(mask[incomplete], axis=0)
 
             for i in range(start_index.shape[1]):
 
-                axis_indices = xp.any(
+                axis_indices = numpy.any(
                     indices,
                     axis=tuple(j for j in range(start_index.shape[1]) if j != i),
                 )
-                axis_indices = xp.argwhere(axis_indices).squeeze()
+                axis_indices = numpy.argwhere(axis_indices).squeeze()
 
                 start_index[0, i] = axis_indices[0] - 3
                 end_index[0, i] = axis_indices[-1] + 3
@@ -295,31 +313,28 @@ def gradient_store(
     output: numpy.ndarray,
 ) -> None:
 
-    if HAS_CUDA:
-        xp = cupy
-        stack = xp.asarray(stack)
-    else:
-        xp = numpy
-
     heat_slices = creeping_mean_filter(stack, centroid, sc)
 
-    vector_slices = list(xp.gradient(heat_slices, axis=(1, 2)))
-    vector_slices = xp.stack(vector_slices, axis=3)
+    axes = tuple(range(1, stack.ndim))
+
+    vector_slices = list(numpy.gradient(heat_slices, axis=axes))
+    vector_slices = numpy.stack(vector_slices, axis=stack.ndim)
     vector_slices = vector_slices / (
-        xp.linalg.norm(vector_slices, axis=3)[..., xp.newaxis]
-        + xp.finfo(xp.float32).eps
+        numpy.linalg.norm(vector_slices, axis=stack.ndim)[..., numpy.newaxis]
+        + numpy.finfo(numpy.float32).eps
     )
     vector_slices[~stack] = 0
-
-    if HAS_CUDA:
-        vector_slices = xp.asnumpy(vector_slices)
 
     for i, s in enumerate(vector_slices):
 
         output[slices[sc + i]] += s[subslices[i]]
 
+    return stack.shape[0]
 
-def masks_to_vectors(masks: numpy.ndarray) -> numpy.ndarray:
+
+def masks_to_vectors(masks: numpy.ndarray, name: Optional[str] = None) -> numpy.ndarray:
+
+    name = (name + ": ") if name is not None else ""
 
     if masks.ndim not in [2, 3]:
         message = f"Masks must be 2d or 3d. Got {int(masks.ndim)}d instead."
@@ -342,25 +357,34 @@ def masks_to_vectors(masks: numpy.ndarray) -> numpy.ndarray:
     slices = scipy.ndimage.find_objects(labels)
     sc = 0
 
-    vector = numpy.zeros(masks.shape + (2,), dtype=numpy.float32)
+    vector = numpy.zeros(masks.shape + (masks.ndim,), dtype=numpy.float32)
 
-    threads = []
-    with ThreadPoolExecutor() as executor:
+    threads = set()
+    completed = 0
+    with ThreadPoolExecutor(2) as executor:
         for stack, subslices, centroid in stack_rois(labels, slices):
 
-            threads.append(
+            threads.add(
                 executor.submit(
                     gradient_store, stack, slices, subslices, centroid, sc, vector
                 )
             )
-            # gradient_store(stack, slices, subslices, centroid, sc, vector)
 
             sc += stack.shape[0]
 
-    for thread in threads:
-        thread.result()
+            # Pause every 10 iterations to let threads complete to conserve memory
+            if len(threads) > 10:
+                done, threads = wait(threads, return_when="FIRST_COMPLETED")
+                for thread in done:
+                    completed += thread.result()
+                logger.info(f"{name}{100*completed/len(slices):6.2f}% complete")
 
-    vector = vector.transpose(2, 0, 1)
+        # Check that the last threads completed successfully
+        for thread in as_completed(threads):
+            completed += thread.result()
+            logger.info(f"{name}{100*completed/len(slices):6.2f}% complete")
+
+    vector = vector.transpose((stack.ndim - 1,) + tuple(range(stack.ndim - 1)))
 
     return vector
 
@@ -906,7 +930,7 @@ def _remove_bad_flow_masks(
     logger.debug(
         f"removing bad flows with error higher than {flow_error_threshold:.2e}..."
     )
-    reconstructed_flows = masks_to_flows(masks, device=device)
+    reconstructed_flows = masks_to_vectors(masks)
 
     # difference between predicted flows vs mask flows
     max_mask = numpy.max(masks)

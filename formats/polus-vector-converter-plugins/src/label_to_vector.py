@@ -2,13 +2,19 @@ import argparse
 import logging
 from concurrent.futures import Future
 from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
 from pathlib import Path
 from typing import Any
 from typing import List
 from typing import Optional
 from typing import Tuple
+import warnings
+
+if __name__ == "__main__":
+    # This needs to be done before importing zarr
+    import multiprocessing
+
+    multiprocessing.set_start_method("spawn")
 
 import filepattern
 import numpy
@@ -47,10 +53,7 @@ def init_zarr_file(path: Path, ndims: int, metadata: Any):
 
 
 def flow_thread(
-    file_name: Path,
-    zarr_path: Path,
-    coordinates: Tuple[int, int, Optional[int]],
-    device: Optional[int],
+    file_name: Path, zarr_path: Path, coordinates: Tuple[int, int, Optional[int]]
 ) -> bool:
     x, y, z = coordinates
     ndims = 2 if z is None else 3
@@ -118,7 +121,7 @@ def flow_thread(
             masks += 1
 
         masks = numpy.reshape(masks, newshape=masks_shape)
-        flows = dynamics.masks_to_flows(masks, device=device)
+        flows = dynamics.masks_to_vectors(masks, file_name.name + f"{x, y, z}")
 
         logger.debug(
             f"Computed flows on tile (x, y, z) = {x, y, z} in file {file_name.name}"
@@ -142,6 +145,7 @@ def main(
     file_pattern: str,
     output_dir: Path,
 ):
+
     fp = filepattern.FilePattern(input_dir, file_pattern)
     files = [Path(file[0]["file"]).resolve() for file in fp]
     files = list(
@@ -152,9 +156,7 @@ def main(
         )
     )
 
-    executor = (ThreadPoolExecutor if utils.USE_GPU else ProcessPoolExecutor)(
-        utils.NUM_THREADS
-    )
+    executor = ProcessPoolExecutor(utils.NUM_THREADS)
     processes: List[Future[bool]] = list()
 
     for in_file in files:
@@ -176,33 +178,26 @@ def main(
             for y in range(0, y_shape, utils.TILE_SIZE):
                 for x in range(0, x_shape, utils.TILE_SIZE):
                     coordinates = x, y, z
-                    device = (tile_count % utils.NUM_THREADS) if utils.USE_GPU else None
                     tile_count += 1
 
-                    # flow_thread(in_file, out_file, coordinates, device)
-
                     processes.append(
-                        executor.submit(
-                            flow_thread,
-                            in_file,
-                            out_file,
-                            coordinates,
-                            device,
-                        )
+                        executor.submit(flow_thread, in_file, out_file, coordinates)
                     )
 
-    done, not_done = wait(processes, 0)
+    not_done = [1]
     while len(not_done) > 0:
-        logger.info(f"Percent complete: {100 * len(done) / len(processes):6.3f}%")
+        done, not_done = wait(processes, 5)
         for r in done:
             r.result()
-        done, not_done = wait(processes, 5)
+        logger.info(f"Percent complete: {100 * len(done) / len(processes):6.3f}%")
+
     executor.shutdown()
 
     return
 
 
 if __name__ == "__main__":
+
     """Argument parsing"""
     logger.info("Parsing arguments...")
     parser = argparse.ArgumentParser(
