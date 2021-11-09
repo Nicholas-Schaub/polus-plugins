@@ -139,32 +139,32 @@ def stack_rois(
         yield stack, sub_slices, centroid
 
 
-def mean_filt_2d(image):
+def box_filt_2d(image, w=3):
 
     integral_image = image.cumsum(axis=1).cumsum(axis=2)
     mean_filt = (
-        integral_image[:, 3:, 3:]
-        - integral_image[:, 3:, :-3]
-        - integral_image[:, :-3, 3:]
-        + integral_image[:, :-3, :-3]
-    ) / 9
+        integral_image[:, w:, w:]
+        - integral_image[:, w:, :-w]
+        - integral_image[:, :-w, w:]
+        + integral_image[:, :-w, :-w]
+    )
 
     return mean_filt
 
 
-def mean_filt_3d(image):
+def box_filt_3d(image, w=3):
 
     integral_image = image.cumsum(axis=1).cumsum(axis=2).cumsum(axis=3)
     mean_filt = (
-        integral_image[:, 3:, 3:, 3:]
-        + integral_image[:, 3:, :-3, :-3]
-        + integral_image[:, :-3, 3:, :-3]
-        + integral_image[:, :-3, :-3, 3:]
-        - integral_image[:, :-3, :-3, :-3]
-        - integral_image[:, :-3, 3:, 3:]
-        - integral_image[:, 3:, :-3, 3:]
-        - integral_image[:, 3:, 3:, :-3]
-    ) / 27
+        integral_image[:, w:, w:, w:]
+        + integral_image[:, w:, :-w, :-w]
+        + integral_image[:, :-w, w:, :-w]
+        + integral_image[:, :-w, :-w, w:]
+        - integral_image[:, :-w, :-w, :-w]
+        - integral_image[:, :-w, w:, w:]
+        - integral_image[:, w:, :-w, w:]
+        - integral_image[:, w:, w:, :-w]
+    )
 
     return mean_filt
 
@@ -208,7 +208,8 @@ def creeping_mean_filter(
         int
     )
 
-    mean_filt = mean_filt_2d if stack.ndim == 3 else mean_filt_3d
+    box_filt = box_filt_2d if stack.ndim == 3 else box_filt_3d
+    box_norm = 9 if stack.ndim == 3 else box_filt_3d
     axes = tuple(range(1, stack.ndim))
 
     background = ~stack
@@ -249,7 +250,7 @@ def creeping_mean_filter(
         output[flame_index] += utils.DIFF_FUEL
 
         # Apply the mean filter using the integral image
-        heat = mean_filt(output[slices_tuple])
+        heat = box_filt(output[slices_tuple]) / box_norm
 
         b = background[subslices_tuple]
         heat[b] = 0
