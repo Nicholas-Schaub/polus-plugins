@@ -4,6 +4,7 @@ from multiprocessing import cpu_count
 from pathlib import Path
 
 import numpy
+import cupy
 
 import torch
 
@@ -11,8 +12,14 @@ POLUS_LOG = getattr(logging, os.environ.get("POLUS_LOG", "INFO"))
 POLUS_EXT = os.environ.get("POLUS_EXT", ".ome.tif")
 
 USE_GPU = torch.cuda.is_available()
+HAS_CUDA = cupy.cuda.runtime.getDeviceCount() > 0
 DEVICES = list(range(torch.cuda.device_count())) if USE_GPU else None
-NUM_THREADS = max(1, (3 * cpu_count()) // 4)
+
+if HAS_CUDA:
+    NUM_THREADS = cupy.cuda.runtime.getDeviceCount() * 2
+    NUM_THREADS += max(0, (cpu_count() - NUM_THREADS) // 2)
+else:
+    NUM_THREADS = max(1, cpu_count() // 2)
 
 TILE_SIZE = 2048
 TILE_OVERLAP = 64

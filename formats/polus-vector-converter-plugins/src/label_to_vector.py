@@ -8,7 +8,6 @@ from typing import Any
 from typing import List
 from typing import Optional
 from typing import Tuple
-import warnings
 
 if __name__ == "__main__":
     # This needs to be done before importing zarr
@@ -121,7 +120,7 @@ def flow_thread(
             masks += 1
 
         masks = numpy.reshape(masks, newshape=masks_shape)
-        flows = dynamics.masks_to_vectors(masks, file_name.name + f"{x, y, z}")
+        flows = dynamics.labels_to_vectors(masks, file_name.name + f"{x, y, z}")
 
         logger.debug(
             f"Computed flows on tile (x, y, z) = {x, y, z} in file {file_name.name}"
@@ -180,6 +179,8 @@ def main(
                     coordinates = x, y, z
                     tile_count += 1
 
+                    # print(f"in_file: {in_file}")
+                    # flow_thread(in_file, out_file, coordinates)
                     processes.append(
                         executor.submit(flow_thread, in_file, out_file, coordinates)
                     )
