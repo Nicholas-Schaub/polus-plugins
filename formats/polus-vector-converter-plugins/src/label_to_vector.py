@@ -179,8 +179,6 @@ def main(
                     coordinates = x, y, z
                     tile_count += 1
 
-                    # print(f"in_file: {in_file}")
-                    # flow_thread(in_file, out_file, coordinates)
                     processes.append(
                         executor.submit(flow_thread, in_file, out_file, coordinates)
                     )

@@ -6,14 +6,10 @@ from pathlib import Path
 import numpy
 import cupy
 
-import torch
-
 POLUS_LOG = getattr(logging, os.environ.get("POLUS_LOG", "INFO"))
 POLUS_EXT = os.environ.get("POLUS_EXT", ".ome.tif")
 
-USE_GPU = torch.cuda.is_available()
 HAS_CUDA = cupy.cuda.runtime.getDeviceCount() > 0
-DEVICES = list(range(torch.cuda.device_count())) if USE_GPU else None
 
 if HAS_CUDA:
     NUM_THREADS = cupy.cuda.runtime.getDeviceCount() * 2

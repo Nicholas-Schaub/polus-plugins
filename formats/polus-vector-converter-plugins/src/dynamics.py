@@ -3,16 +3,15 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 from typing import Iterator
-from typing import Union
 from concurrent.futures import ThreadPoolExecutor, wait, as_completed
 from multiprocessing import current_process
 from itertools import product
+import warnings
 
 import numpy
 import cupy
 import scipy.ndimage.measurements
-import torch.nn.functional
-from numba import njit
+from preadator import ProcessManager
 
 import utils
 
@@ -355,7 +354,7 @@ def labels_to_vectors(
 
     p_identity = current_process()._identity
     process_num = 0 if len(p_identity) == 0 else current_process()._identity[0] - 1
-    use_gpu = cupy.cuda.runtime.getDeviceCount() >= process_num
+    use_gpu = (cupy.cuda.runtime.getDeviceCount() >= process_num) and utils.HAS_CUDA
     device = "gpu" if use_gpu else "cpu"
     if use_gpu:
         cupy.cuda.Device(process_num // 2).use()
@@ -436,16 +435,21 @@ def relabel(
     labels: numpy.ndarray,
     original_index: numpy.ndarray,
     flow_points: numpy.ndarray,
+    device: str,
 ) -> Tuple[numpy.ndarray, numpy.ndarray]:
 
-    flow_index = numpy.round(flow_points).astype(numpy.uint32)
+    xp = cupy if device == "gpu" else numpy
+
+    flow_index = xp.round(flow_points).astype(xp.int32)
     flow_index = tuple(flow_index[p] for p in range(flow_index.shape[0]))
 
     # Relabel original points if the flow hits an object
     # Propagate the label along the flow
     new_labels = labels[flow_index]
-    old_labels = numpy.full(new_labels.shape, -2)
-    while numpy.any(new_labels != old_labels):
+    old_labels = xp.full(new_labels.shape, -2)
+
+    i = 30
+    while xp.any(new_labels != old_labels):
         old_labels = new_labels
         resolved = new_labels > -1
         orig_ind = tuple(p[resolved] for p in original_index)
@@ -453,22 +457,26 @@ def relabel(
         labels[orig_ind] = labels[flow_ind]
         new_labels = labels[flow_index]
 
-    return [o[~resolved] for o in original_index], flow_points[:, ~resolved]
+    return tuple(o[~resolved] for o in original_index), flow_points[:, ~resolved]
 
 
-def interpolate_flow(vectors: numpy.ndarray, points: numpy.ndarray) -> numpy.ndarray:
+def interpolate_flow(
+    vectors: numpy.ndarray, points: numpy.ndarray, device: str
+) -> numpy.ndarray:
+
+    xp = cupy if device == "gpu" else numpy
 
     ndims = vectors.shape[0]
 
-    points_floor = points.astype(numpy.uint32)
+    points_floor = points.astype(xp.int32)
     points_ceil = points_floor + 1
     for d in range(ndims):
-        points_ceil[d, :] = numpy.clip(
-            points_ceil[d, :], a_min=None, a_max=vectors.shape[d + 1]
+        points_ceil[d, :] = xp.clip(
+            points_ceil[d, :], a_min=0, a_max=vectors.shape[d + 1] - 1
         )
 
     points_norm = points - points_floor
-    points_norm_inv = numpy.clip(
+    points_norm_inv = xp.clip(
         points_ceil - points_floor - points_norm, a_min=0, a_max=None
     )
 
@@ -476,7 +484,7 @@ def interpolate_flow(vectors: numpy.ndarray, points: numpy.ndarray) -> numpy.nda
     # N x P x (2, ) * N
     # where N is the number of dimensions and P is the number of points
     shape = points.shape + (2,) * ndims
-    vector_field = numpy.zeros(shape)
+    vector_field = xp.zeros(shape)
     for index in product(range(2), repeat=ndims):
 
         vector_field[(slice(None), slice(None)) + index] = vectors[
@@ -491,10 +499,10 @@ def interpolate_flow(vectors: numpy.ndarray, points: numpy.ndarray) -> numpy.nda
     for d in reversed(range(ndims)):
 
         if vector_field.ndim == 3:
-            p = numpy.zeros(vector_field.shape + (1,))
-            vector_field = numpy.expand_dims(vector_field, axis=2)
+            p = xp.zeros(vector_field.shape + (1,))
+            vector_field = xp.expand_dims(vector_field, axis=2)
         else:
-            p = numpy.zeros(vector_field.shape[:-1] + (1,))
+            p = xp.zeros(vector_field.shape[:-1] + (1,))
         p[..., 0, 0] = points_norm_inv[d]
         p[..., 1, 0] = points_norm[d]
 
@@ -510,17 +518,28 @@ def vectors_to_labels(
     vector: numpy.ndarray, mask: numpy.ndarray, r: int
 ) -> numpy.ndarray:
 
+    p_identity = current_process()._identity
+    process_num = 0 if len(p_identity) == 0 else current_process()._identity[0] - 1
+
+    xp = cupy if utils.HAS_CUDA else numpy
+    device = "gpu" if utils.HAS_CUDA else "cpu"
+
+    if utils.HAS_CUDA:
+        cupy.cuda.Device(process_num % cupy.cuda.runtime.getDeviceCount()).use()
+        vector = xp.asarray(vector)
+        mask = xp.asarray(mask)
+
     """Step 1: Find object boundaries using local dot product"""
     # Normalize the vector
     v_norm = vector_norm(vector, axis=0)
 
     # Pad vectors for integral image calculations
     pad = [(0, 0)] + [[r + 1, r] for _ in range(1, vector.ndim)]
-    vector_pad = numpy.pad(v_norm, pad)
-    mask_pad = numpy.pad(mask, pad)
+    vector_pad = xp.pad(v_norm, pad)
+    mask_pad = xp.pad(mask, pad)
 
     # Get a local count of foreground pixels
-    counts = box_filt_2d(mask_pad.astype(numpy.float32), 2 * r + 1)
+    counts = box_filt_2d(mask_pad.astype(xp.int32), 2 * r + 1)
     counts[~mask] = 0
 
     # Get the local mean vector
@@ -528,42 +547,69 @@ def vectors_to_labels(
 
     # Compute the dot product between the local mean vector and the vector at a point
     v_dot = (v_norm * v_mean).sum(axis=0)
+    v_div = numpy.gradient(v_norm[0], axis=0) + numpy.gradient(v_norm[1], axis=1)
 
     """ Step 2: Label internal objects """
     # Label cell objects without borders
-    cell_mask = scipy.ndimage.binary_fill_holes(
-        v_dot >= 0.8, numpy.ones((2 * r + 1, 2 * r + 1))
-    ).astype(int)
-    cells, _ = scipy.ndimage.label(cell_mask & mask.squeeze(), numpy.ones((3, 3)))
-    cells[mask.squeeze() & (cells == 0)] = -1
+    dot_internal = ((v_div < 0.0) | (v_dot >= 0.8)) & mask.squeeze()
+    if utils.HAS_CUDA:
+        dot_internal = dot_internal.get()
+        mask = mask.get()
+    dot_internal = scipy.ndimage.binary_fill_holes(
+        dot_internal, numpy.ones((2 * r + 1, 2 * r + 1))
+    )
+    cells, _ = scipy.ndimage.label(dot_internal & mask.squeeze(), numpy.ones((3, 3)))
+    if utils.HAS_CUDA:
+        cells = xp.asarray(cells)
+        mask = xp.asarray(mask)
+        dot_internal = xp.asarray(dot_internal)
+    dot_boundary = mask.squeeze() & ~dot_internal
+
+    # If no borders, just return the labeled images
+    if ~xp.any(dot_boundary):
+
+        if utils.HAS_CUDA:
+            ProcessManager.log("Return early")
+            cells = cells.get()
+
+        return cells
 
     """ Step 3: Follow flows from borders to objects """
     # Get starting points for interpolation at border pixels
-    dot_boundary = v_dot < 0.8
-    points_original = numpy.where(dot_boundary)
-    points_float = numpy.asarray(points_original).astype(numpy.float32)
+    points_original = xp.where(dot_boundary)
+    points_float = xp.asarray(points_original).astype(xp.float32)
+    cells[points_original] = -1
 
     # Run the first iteration of flow dynamics using interpolation
     points_float += v_norm[(slice(None),) + points_original]
 
     # Propagate labels
-    points_original, points_float = relabel(cells, points_original, points_float)
+    points_original, points_float = relabel(
+        cells, points_original, points_float, device
+    )
 
     # Run interpolation iterations
     factor = 1.00
     for batch in range(5):
 
         # Nudge the current position with the local average in case it's stuck in a well
-        flow_index = numpy.round(points_float).astype(numpy.uint32)
+        flow_index = xp.round(points_float).astype(xp.int32)
         flow_index = tuple(flow_index[p] for p in range(flow_index.shape[0]))
 
         # Follow flows for 5 steps
         for step in range(5):
             factor *= 1.10
-            points_float = interpolate_flow(v_norm * factor, points_float)
+            points_float = interpolate_flow(v_norm * factor, points_float, device)
+
+        for d in range(points_float.ndim - 1):
+            points_float[d, :] = xp.clip(
+                points_float[d, :], a_min=0, a_max=v_norm.shape[d + 1] - 1
+            )
 
         # Resolve labels
-        points_original, points_float = relabel(cells, points_original, points_float)
+        points_original, points_float = relabel(
+            cells, points_original, points_float, device
+        )
 
         if points_float.shape[1] == 0:
             break
@@ -575,21 +621,28 @@ def vectors_to_labels(
         cells[cells == -1] = 0
 
     """ Step 4: Remove objects smaller than the integral image window size """
-    slices = scipy.ndimage.find_objects(cells)
+    if utils.HAS_CUDA:
+        slices = scipy.ndimage.find_objects(cells.get())
+    else:
+        slices = scipy.ndimage.find_objects(cells)
+
     removed_objects = False
     for i, s in enumerate(slices):
 
         tile = cells[s]
-        mask = tile == (i + 1)
+        tile_mask = tile == (i + 1)
 
-        if mask.astype(numpy.uint32).sum() < (2 * r + 1) ** cells.ndim:
+        if mask.astype(xp.int32).sum() < (2 * r + 1) ** cells.ndim:
 
             removed_objects = True
-            tile[mask] = 0
+            tile[tile_mask] = 0
             cells[s] = tile
 
     if removed_objects:
-        _, inverse = numpy.unique(cells, return_inverse=True)
+        _, inverse = xp.unique(cells, return_inverse=True)
         cells = inverse.reshape(cells.shape)
+
+    if utils.HAS_CUDA:
+        cells = cells.get()
 
     return cells
