@@ -4,12 +4,20 @@ from multiprocessing import cpu_count
 from pathlib import Path
 
 import numpy
-import cupy
 
 POLUS_LOG = getattr(logging, os.environ.get("POLUS_LOG", "INFO"))
 POLUS_EXT = os.environ.get("POLUS_EXT", ".ome.tif")
 
-HAS_CUDA = cupy.cuda.runtime.getDeviceCount() > 0
+try:
+    import cupy
+
+    NUM_GPUS = cupy.cuda.runtime.getDeviceCount()
+    HAS_CUDA = NUM_GPUS > 0
+except ImportError:
+    NUM_GPUS = 0
+    HAS_CUDA = False
+
+# HAS_CUDA = False
 
 if HAS_CUDA:
     NUM_THREADS = cupy.cuda.runtime.getDeviceCount() * 2

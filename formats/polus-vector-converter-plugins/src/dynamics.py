@@ -6,14 +6,15 @@ from typing import Iterator
 from concurrent.futures import ThreadPoolExecutor, wait, as_completed
 from multiprocessing import current_process
 from itertools import product
-import warnings
 
 import numpy
-import cupy
 import scipy.ndimage.measurements
 from preadator import ProcessManager
 
 import utils
+
+if utils.HAS_CUDA:
+    import cupy
 
 logging.basicConfig(
     format="%(asctime)s - %(name)-8s - %(levelname)-8s - %(message)s",
@@ -46,8 +47,8 @@ def geometric_median(mask: numpy.ndarray) -> numpy.ndarray:
 
 
 def stack_rois(
-    image: numpy.ndarray, slices: List[Tuple[slice, slice]], device: str
-) -> Iterator[Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]]:
+    image: numpy.ndarray, slices: List[Tuple[slice]], device: str
+) -> Iterator[Tuple[numpy.ndarray, List[Tuple[slice]], numpy.ndarray]]:
     """Stack multiple ROIs into a single n-d array
 
     This function stacks all ROIs along the 0th dimension such that the centroid of each
@@ -62,11 +63,12 @@ def stack_rois(
 
     Args:
         image (numpy.ndarray): A labeled image
-        slices (List[Tuple[slice, slice]]): A list of slices, one for each ROI.
+        slices (List[Tuple[slice]]): A list of slice tuples, one for each ROI.
         device (str): Must be either "cpu" or "gpu"
 
     Yields:
-        Iterator[Tuple[numpy.ndarray, numpy.ndarray]]: [description]
+        Iterator[Tuple[numpy.ndarray, List[Tuple], numpy.ndarray]]: Returns a mask
+            stack, a list of slice tuples for each roi, and the centroid location.
     """
 
     xp = cupy if device == "gpu" else numpy
@@ -145,34 +147,59 @@ def stack_rois(
         yield stack, sub_slices, centroid
 
 
-def box_filt_2d(image, w=3):
+class BoxFilterND:
+    def __init__(self, ndims: int, w: int = 3):
+        """A N-Dimensional Box Filter
 
-    integral_image = image.cumsum(axis=1).cumsum(axis=2)
-    mean_filt = (
-        integral_image[:, w:, w:]
-        - integral_image[:, w:, :-w]
-        - integral_image[:, :-w, w:]
-        + integral_image[:, :-w, :-w]
-    )
+        This is a base class for efficient computation of box filters using integral
+        images (aka summed area tables). This is O(1) complexity relative to kernel
+        size.
 
-    return mean_filt
+        This base class simply calculates the local sum of pixel values.
 
+        Args:
+            ndims (int): The number of dimensions of the input matrix. It is assumed the
+                first index is used for different channels or images, and not included
+                in the calculations.
+            w (int, optional): The window size for the box filter. Defaults to 3.
+        """
 
-def box_filt_3d(image, w=3):
+        self.index = []
+        self.sign = []
 
-    integral_image = image.cumsum(axis=1).cumsum(axis=2).cumsum(axis=3)
-    mean_filt = (
-        integral_image[:, w:, w:, w:]
-        + integral_image[:, w:, :-w, :-w]
-        + integral_image[:, :-w, w:, :-w]
-        + integral_image[:, :-w, :-w, w:]
-        - integral_image[:, :-w, :-w, :-w]
-        - integral_image[:, :-w, w:, w:]
-        - integral_image[:, w:, :-w, w:]
-        - integral_image[:, w:, w:, :-w]
-    )
+        should_add = (ndims - 1) % 2
 
-    return mean_filt
+        # Calculate the box filter indices
+        for d in product(range(2), repeat=ndims - 1):
+
+            if (sum(d) % 2) == should_add:
+                self.sign.append(1)
+            else:
+                self.sign.append(-1)
+
+            index = [slice(None)]
+
+            for i in d:
+                if i:
+                    index.append(slice(w, None))
+                else:
+                    index.append(slice(None, -w))
+
+            self.index.append(tuple(index))
+
+    def __call__(self, image: numpy.ndarray) -> numpy.ndarray:
+
+        # Create the integral image
+        integral_image = image
+        for d in range(1, integral_image.ndim):
+            integral_image = integral_image.cumsum(axis=d)
+
+        # Calculate the box filter
+        output = sum(
+            sign * integral_image[index] for sign, index in zip(self.sign, self.index)
+        )
+
+        return output
 
 
 def creeping_mean_filter(
@@ -216,8 +243,8 @@ def creeping_mean_filter(
         int
     )
 
-    box_filt = box_filt_2d if stack.ndim == 3 else box_filt_3d
-    box_norm = 9 if stack.ndim == 3 else 27
+    box_filt = BoxFilterND(stack.ndim)
+    box_norm = 3 ** (stack.ndim - 1)
     axes = tuple(range(1, stack.ndim))
 
     background = ~stack
@@ -301,7 +328,7 @@ def creeping_mean_filter(
                     indices,
                     axis=tuple(j for j in range(start_index.shape[1]) if j != i),
                 )
-                axis_indices = xp.argwhere(axis_indices).squeeze()
+                axis_indices = xp.argwhere(axis_indices).squeeze(axis=1)
 
                 start_index[0, i] = axis_indices[0] - 3
                 end_index[0, i] = axis_indices[-1] + 3
@@ -313,7 +340,7 @@ def creeping_mean_filter(
 
 def vector_norm(vector: numpy.ndarray, axis: int = -1):
 
-    norm = (vector ** 2).sum(axis=axis)
+    norm = numpy.sqrt((vector ** 2).sum(axis=axis))
 
     vector = vector / (
         numpy.expand_dims(norm, axis=axis) + numpy.finfo(numpy.float32).eps
@@ -331,6 +358,25 @@ def gradient_store(
     output: numpy.ndarray,
     device: str,
 ) -> None:
+    """Calculate vector fields
+
+    This function is primarily designed to be run inside a thread, otherwise this code
+    would just belong in the `labels_to_vectors` function.
+
+    Args:
+        stack (numpy.ndarray): Stack of image masks
+        slices (List[Tuple[slice, slice]]): A list of slice tuples indicating the
+            location of a particular mask in the original image.
+        subslices (List[Tuple[slice, slice]]): A list of slice tuples that indicate the
+            bounds of a mask within the stack.
+        centroid (numpy.ndarray): The location of the centroid in the stack.
+        sc (int): The starting roi ID.
+        output (numpy.ndarray): The output image vector field
+        device (str): Must be one of ["cpu","gpu"]
+
+    Returns:
+        int: The number of ROIs processed
+    """
 
     heat_slices = creeping_mean_filter(stack, centroid, sc, device)
 
@@ -351,20 +397,39 @@ def gradient_store(
 def labels_to_vectors(
     masks: numpy.ndarray, name: Optional[str] = None
 ) -> numpy.ndarray:
+    """Convert labels to vector fields
 
+    This function uses a modified diffusion algorithm to calculate vector flow fields
+    from the centroid of an object out to its edges.
+
+    Args:
+        masks (numpy.ndarray): An image in 2d or 3d
+        name (Optional[str], optional): Name of the image to process (for logging
+            purposes). Defaults to None.
+
+    Returns:
+        numpy.ndarray: An ND array of vectors, where N is masks.ndims+1, where the first
+            dimension are different components of the vectors. For example, for a 2D
+            input mask of size MxN, the output shape will be (2,M,N).
+    """
+
+    # If running in a separate process, determine the process number
     p_identity = current_process()._identity
     process_num = 0 if len(p_identity) == 0 else current_process()._identity[0] - 1
-    use_gpu = (cupy.cuda.runtime.getDeviceCount() >= process_num) and utils.HAS_CUDA
+
+    # Detect whether a GPU is present
+    use_gpu = (utils.NUM_GPUS >= process_num) and utils.HAS_CUDA
     device = "gpu" if use_gpu else "cpu"
     if use_gpu:
         cupy.cuda.Device(process_num // 2).use()
 
-    xp = cupy if use_gpu else numpy
+    # Use cupy if running on gpu, otherwise use numpy
+    xp = numpy if not use_gpu else cupy
 
     name = (name + ": ") if name is not None else ""
 
     if masks.ndim not in [2, 3]:
-        message = f"Masks must be 2d or 3d. Got {int(masks.ndim)}d instead."
+        message = f"{name}Masks must be 2d or 3d. Got {int(masks.ndim)}d instead."
         logger.error(message)
         raise ValueError(message)
 
@@ -372,16 +437,17 @@ def labels_to_vectors(
     uniques, inverse = xp.unique(masks, return_inverse=True)
     if len(uniques) == 1:
         if uniques[0] == 0:
-            logger.warning("No objects found. Returning zero flows.")
+            logger.warning(f"{name}No objects found. Returning zero flows.")
         else:
             logger.warning(
-                "The masked tile/chunk contains one object and no "
+                f"{name}The masked tile/chunk contains one object and no "
                 "background pixels. Returning zero flows."
             )
         return xp.zeros(shape=(masks.ndim, *masks.shape), dtype=xp.float32)
 
     labels = xp.reshape(inverse, masks.shape)
 
+    # Get locations of each object
     if use_gpu:
         slices = scipy.ndimage.find_objects(labels.get())
     else:
@@ -389,8 +455,10 @@ def labels_to_vectors(
 
     sc = 0
 
+    # Initialize the output
     vector = xp.zeros(masks.shape + (masks.ndim,), dtype=xp.float32)
 
+    # Run vectorization in threads
     threads = set()
     completed = 0
     with ThreadPoolExecutor(2) as executor:
@@ -437,8 +505,23 @@ def relabel(
     flow_points: numpy.ndarray,
     device: str,
 ) -> Tuple[numpy.ndarray, numpy.ndarray]:
+    """Follow flows to objects
 
-    xp = cupy if device == "gpu" else numpy
+    This function follows flows back to objects. It is iterative, so that labels get
+    propagated backwards along vectors.
+
+    Args:
+        labels (numpy.ndarray): An image of labeled ROIs.
+        original_index (numpy.ndarray): Original index of vectors
+        flow_points (numpy.ndarray): Current location of flows
+        device (str): Must be one of ["cpu","gpu"]
+
+    Returns:
+        Tuple[numpy.ndarray, numpy.ndarray]: Returns the subset of original_index and
+            flow_points that do not have labels after relabeling.
+    """
+
+    xp = numpy if device == "cpu" else cupy
 
     flow_index = xp.round(flow_points).astype(xp.int32)
     flow_index = tuple(flow_index[p] for p in range(flow_index.shape[0]))
@@ -448,7 +531,6 @@ def relabel(
     new_labels = labels[flow_index]
     old_labels = xp.full(new_labels.shape, -2)
 
-    i = 30
     while xp.any(new_labels != old_labels):
         old_labels = new_labels
         resolved = new_labels > -1
@@ -463,20 +545,35 @@ def relabel(
 def interpolate_flow(
     vectors: numpy.ndarray, points: numpy.ndarray, device: str
 ) -> numpy.ndarray:
+    """Move a pixel to a new location based on the current vectors in the region
 
-    xp = cupy if device == "gpu" else numpy
+    This function takes a vector field and a set of points, and moves each point one
+    step along the vector field. Points exist in continuous space, and the value of the
+    vector field at a point is determined by interpolating local vector values at the
+    surrounding pixels.
+
+    This function works on n-dimensional tensor fields.
+
+    Args:
+        vectors (numpy.ndarray): n-dimensional tensor field
+        points (numpy.ndarray): An array of points
+        device (str): Must be one of ["cpu","gpu"]
+
+    Returns:
+        numpy.ndarray: The points after following flows for one step
+    """
 
     ndims = vectors.shape[0]
 
-    points_floor = points.astype(xp.int32)
+    points_floor = points.astype(numpy.int32)
     points_ceil = points_floor + 1
     for d in range(ndims):
-        points_ceil[d, :] = xp.clip(
+        points_ceil[d, :] = numpy.clip(
             points_ceil[d, :], a_min=0, a_max=vectors.shape[d + 1] - 1
         )
 
     points_norm = points - points_floor
-    points_norm_inv = xp.clip(
+    points_norm_inv = numpy.clip(
         points_ceil - points_floor - points_norm, a_min=0, a_max=None
     )
 
@@ -484,7 +581,7 @@ def interpolate_flow(
     # N x P x (2, ) * N
     # where N is the number of dimensions and P is the number of points
     shape = points.shape + (2,) * ndims
-    vector_field = xp.zeros(shape)
+    vector_field = numpy.zeros(shape)
     for index in product(range(2), repeat=ndims):
 
         vector_field[(slice(None), slice(None)) + index] = vectors[
@@ -499,10 +596,10 @@ def interpolate_flow(
     for d in reversed(range(ndims)):
 
         if vector_field.ndim == 3:
-            p = xp.zeros(vector_field.shape + (1,))
-            vector_field = xp.expand_dims(vector_field, axis=2)
+            p = numpy.zeros(vector_field.shape + (1,))
+            vector_field = numpy.expand_dims(vector_field, axis=2)
         else:
-            p = xp.zeros(vector_field.shape[:-1] + (1,))
+            p = numpy.zeros(vector_field.shape[:-1] + (1,))
         p[..., 0, 0] = points_norm_inv[d]
         p[..., 1, 0] = points_norm[d]
 
@@ -522,7 +619,6 @@ def vectors_to_labels(
     process_num = 0 if len(p_identity) == 0 else current_process()._identity[0] - 1
 
     xp = cupy if utils.HAS_CUDA else numpy
-    device = "gpu" if utils.HAS_CUDA else "cpu"
 
     if utils.HAS_CUDA:
         cupy.cuda.Device(process_num % cupy.cuda.runtime.getDeviceCount()).use()
@@ -539,76 +635,71 @@ def vectors_to_labels(
     mask_pad = xp.pad(mask, pad)
 
     # Get a local count of foreground pixels
-    counts = box_filt_2d(mask_pad.astype(xp.int32), 2 * r + 1)
+    box_filt = BoxFilterND(mask_pad.ndim, 2 * r + 1)
+    counts = box_filt(mask_pad.astype(xp.int32))
     counts[~mask] = 0
 
     # Get the local mean vector
-    v_mean = box_filt_2d(vector_pad, 2 * r + 1) / counts
+    v_mean = box_filt(vector_pad) / counts
 
     # Compute the dot product between the local mean vector and the vector at a point
     v_dot = (v_norm * v_mean).sum(axis=0)
-    v_div = numpy.gradient(v_norm[0], axis=0) + numpy.gradient(v_norm[1], axis=1)
+    v_div = sum(numpy.gradient(v_norm[i], axis=i) for i in range(v_norm.shape[0]))
 
     """ Step 2: Label internal objects """
-    # Label cell objects without borders
-    dot_internal = ((v_div < 0.0) | (v_dot >= 0.8)) & mask.squeeze()
+    # Internal pixels
+    internal = ((v_div < 0.0) | (v_dot >= 0.8)) & mask.squeeze()
+
+    # Boundary pixels
+    boundary = mask.squeeze() & ~internal
+    boundary_points = xp.where(boundary)
     if utils.HAS_CUDA:
-        dot_internal = dot_internal.get()
+        internal = internal.get()
         mask = mask.get()
-    dot_internal = scipy.ndimage.binary_fill_holes(
-        dot_internal, numpy.ones((2 * r + 1, 2 * r + 1))
+        boundary_points = tuple(b.get() for b in boundary_points)
+        v_norm = v_norm.get()
+
+    cells, _ = scipy.ndimage.label(
+        internal & mask.squeeze(), numpy.ones((3,) * v_dot.ndim)
     )
-    cells, _ = scipy.ndimage.label(dot_internal & mask.squeeze(), numpy.ones((3, 3)))
-    if utils.HAS_CUDA:
-        cells = xp.asarray(cells)
-        mask = xp.asarray(mask)
-        dot_internal = xp.asarray(dot_internal)
-    dot_boundary = mask.squeeze() & ~dot_internal
 
     # If no borders, just return the labeled images
-    if ~xp.any(dot_boundary):
-
-        if utils.HAS_CUDA:
-            ProcessManager.log("Return early")
-            cells = cells.get()
+    if ~numpy.any(boundary):
 
         return cells
 
     """ Step 3: Follow flows from borders to objects """
     # Get starting points for interpolation at border pixels
-    points_original = xp.where(dot_boundary)
-    points_float = xp.asarray(points_original).astype(xp.float32)
-    cells[points_original] = -1
+    points_float = numpy.asarray(boundary_points).astype(numpy.float32)
+    cells[boundary_points] = -1
 
     # Run the first iteration of flow dynamics using interpolation
-    points_float += v_norm[(slice(None),) + points_original]
+    points_float += v_norm[(slice(None),) + boundary_points]
 
     # Propagate labels
-    points_original, points_float = relabel(
-        cells, points_original, points_float, device
-    )
+    boundary_points, points_float = relabel(cells, boundary_points, points_float, "cpu")
 
     # Run interpolation iterations
-    factor = 1.00
+    # factor = 1.00
     for batch in range(5):
 
         # Nudge the current position with the local average in case it's stuck in a well
-        flow_index = xp.round(points_float).astype(xp.int32)
+        flow_index = numpy.round(points_float).astype(numpy.int32)
         flow_index = tuple(flow_index[p] for p in range(flow_index.shape[0]))
 
         # Follow flows for 5 steps
         for step in range(5):
-            factor *= 1.10
-            points_float = interpolate_flow(v_norm * factor, points_float, device)
+            # factor *= 1.1
+            points_float = interpolate_flow(v_norm, points_float, "cpu")
 
         for d in range(points_float.ndim - 1):
-            points_float[d, :] = xp.clip(
+            points_float[d, :] = numpy.clip(
                 points_float[d, :], a_min=0, a_max=v_norm.shape[d + 1] - 1
             )
 
         # Resolve labels
-        points_original, points_float = relabel(
-            cells, points_original, points_float, device
+        boundary_points, points_float = relabel(
+            cells, boundary_points, points_float, "cpu"
         )
 
         if points_float.shape[1] == 0:
@@ -619,30 +710,5 @@ def vectors_to_labels(
             f"{points_float.shape[1]} pixels in the mask were not assigned to an object. Check the output for label quality."
         )
         cells[cells == -1] = 0
-
-    """ Step 4: Remove objects smaller than the integral image window size """
-    if utils.HAS_CUDA:
-        slices = scipy.ndimage.find_objects(cells.get())
-    else:
-        slices = scipy.ndimage.find_objects(cells)
-
-    removed_objects = False
-    for i, s in enumerate(slices):
-
-        tile = cells[s]
-        tile_mask = tile == (i + 1)
-
-        if mask.astype(xp.int32).sum() < (2 * r + 1) ** cells.ndim:
-
-            removed_objects = True
-            tile[tile_mask] = 0
-            cells[s] = tile
-
-    if removed_objects:
-        _, inverse = xp.unique(cells, return_inverse=True)
-        cells = inverse.reshape(cells.shape)
-
-    if utils.HAS_CUDA:
-        cells = cells.get()
 
     return cells

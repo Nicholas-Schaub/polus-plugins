@@ -2,13 +2,13 @@ import argparse
 import logging
 import shutil
 from concurrent.futures import Future
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from concurrent.futures import wait
 from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import Optional
 from typing import Tuple
+import filepattern
+import numpy
 
 if __name__ == "__main__":
     # This needs to be done before importing zarr
@@ -16,8 +16,6 @@ if __name__ == "__main__":
 
     multiprocessing.set_start_method("spawn")
 
-import filepattern
-import numpy
 import zarr
 from bfio import BioReader
 from bfio import BioWriter

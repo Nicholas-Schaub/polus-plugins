@@ -1,14 +1,14 @@
 #!/bin/bash
 
 version=$(<VERSION)
-data_path=$(readlink --canonicalize ../../data/vector_converters/label_to_vector)
+data_path=$(readlink --canonicalize ../../../data)
 
 # Inputs
-inpDir=/data/input
+inpDir=/data/labels
 filePattern=".+"
 
 # Output paths
-outDir=/data/output
+outDir=/data/vectors
 
 # GPU configuration for testing GPU usage in the container
 GPUS=all
