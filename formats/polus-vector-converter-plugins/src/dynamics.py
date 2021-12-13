@@ -6,6 +6,7 @@ from typing import Iterator
 from concurrent.futures import ThreadPoolExecutor, wait, as_completed
 from multiprocessing import current_process
 from itertools import product
+import warnings
 
 import numpy
 import scipy.ndimage.measurements
@@ -500,10 +501,7 @@ def labels_to_vectors(
 
 
 def relabel(
-    labels: numpy.ndarray,
-    original_index: numpy.ndarray,
-    flow_points: numpy.ndarray,
-    device: str,
+    labels: numpy.ndarray, original_index: numpy.ndarray, flow_points: numpy.ndarray
 ) -> Tuple[numpy.ndarray, numpy.ndarray]:
     """Follow flows to objects
 
@@ -521,17 +519,15 @@ def relabel(
             flow_points that do not have labels after relabeling.
     """
 
-    xp = numpy if device == "cpu" else cupy
-
-    flow_index = xp.round(flow_points).astype(xp.int32)
+    flow_index = numpy.round(flow_points).astype(numpy.int32)
     flow_index = tuple(flow_index[p] for p in range(flow_index.shape[0]))
 
     # Relabel original points if the flow hits an object
     # Propagate the label along the flow
     new_labels = labels[flow_index]
-    old_labels = xp.full(new_labels.shape, -2)
+    old_labels = numpy.full(new_labels.shape, -2)
 
-    while xp.any(new_labels != old_labels):
+    while numpy.any(new_labels != old_labels):
         old_labels = new_labels
         resolved = new_labels > -1
         orig_ind = tuple(p[resolved] for p in original_index)
@@ -542,9 +538,7 @@ def relabel(
     return tuple(o[~resolved] for o in original_index), flow_points[:, ~resolved]
 
 
-def interpolate_flow(
-    vectors: numpy.ndarray, points: numpy.ndarray, device: str
-) -> numpy.ndarray:
+def interpolate_flow(vectors: numpy.ndarray, points: numpy.ndarray) -> numpy.ndarray:
     """Move a pixel to a new location based on the current vectors in the region
 
     This function takes a vector field and a set of points, and moves each point one
@@ -557,7 +551,6 @@ def interpolate_flow(
     Args:
         vectors (numpy.ndarray): n-dimensional tensor field
         points (numpy.ndarray): An array of points
-        device (str): Must be one of ["cpu","gpu"]
 
     Returns:
         numpy.ndarray: The points after following flows for one step
@@ -600,8 +593,10 @@ def interpolate_flow(
             vector_field = numpy.expand_dims(vector_field, axis=2)
         else:
             p = numpy.zeros(vector_field.shape[:-1] + (1,))
-        p[..., 0, 0] = points_norm_inv[d]
-        p[..., 1, 0] = points_norm[d]
+
+        shape = (1, points_norm.shape[1]) + (1,) * (vector_field.ndim - 4)
+        p[..., 0, 0] = points_norm_inv[d : d + 1].reshape(shape)
+        p[..., 1, 0] = points_norm[d : d + 1].reshape(shape)
 
         # Stacked matrix multiply
         vector_field = vector_field @ p
@@ -615,15 +610,12 @@ def vectors_to_labels(
     vector: numpy.ndarray, mask: numpy.ndarray, r: int
 ) -> numpy.ndarray:
 
-    p_identity = current_process()._identity
-    process_num = 0 if len(p_identity) == 0 else current_process()._identity[0] - 1
-
-    xp = cupy if utils.HAS_CUDA else numpy
-
     if utils.HAS_CUDA:
-        cupy.cuda.Device(process_num % cupy.cuda.runtime.getDeviceCount()).use()
+        xp = cupy
         vector = xp.asarray(vector)
         mask = xp.asarray(mask)
+    else:
+        xp = numpy
 
     """Step 1: Find object boundaries using local dot product"""
     # Normalize the vector
@@ -640,10 +632,14 @@ def vectors_to_labels(
     counts[~mask] = 0
 
     # Get the local mean vector
-    v_mean = box_filt(vector_pad) / counts
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        v_mean = box_filt(vector_pad) / counts
 
     # Compute the dot product between the local mean vector and the vector at a point
-    v_dot = (v_norm * v_mean).sum(axis=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        v_dot = (v_norm * v_mean).sum(axis=0)
     v_div = sum(numpy.gradient(v_norm[i], axis=i) for i in range(v_norm.shape[0]))
 
     """ Step 2: Label internal objects """
@@ -677,10 +673,9 @@ def vectors_to_labels(
     points_float += v_norm[(slice(None),) + boundary_points]
 
     # Propagate labels
-    boundary_points, points_float = relabel(cells, boundary_points, points_float, "cpu")
+    boundary_points, points_float = relabel(cells, boundary_points, points_float)
 
     # Run interpolation iterations
-    # factor = 1.00
     for batch in range(5):
 
         # Nudge the current position with the local average in case it's stuck in a well
@@ -689,8 +684,7 @@ def vectors_to_labels(
 
         # Follow flows for 5 steps
         for step in range(5):
-            # factor *= 1.1
-            points_float = interpolate_flow(v_norm, points_float, "cpu")
+            points_float = interpolate_flow(v_norm, points_float)
 
         for d in range(points_float.ndim - 1):
             points_float[d, :] = numpy.clip(
@@ -698,15 +692,13 @@ def vectors_to_labels(
             )
 
         # Resolve labels
-        boundary_points, points_float = relabel(
-            cells, boundary_points, points_float, "cpu"
-        )
+        boundary_points, points_float = relabel(cells, boundary_points, points_float)
 
         if points_float.shape[1] == 0:
             break
 
     if points_float.shape[1] != 0:
-        logger.warning(
+        ProcessManager.log(
             f"{points_float.shape[1]} pixels in the mask were not assigned to an object. Check the output for label quality."
         )
         cells[cells == -1] = 0

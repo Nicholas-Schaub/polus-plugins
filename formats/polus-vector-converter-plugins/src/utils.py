@@ -17,13 +17,7 @@ except ImportError:
     NUM_GPUS = 0
     HAS_CUDA = False
 
-# HAS_CUDA = False
-
-if HAS_CUDA:
-    NUM_THREADS = cupy.cuda.runtime.getDeviceCount() * 2
-    NUM_THREADS += max(0, (cpu_count() - NUM_THREADS) // 2)
-else:
-    NUM_THREADS = max(1, cpu_count() // 2)
+NUM_THREADS = max(1, cpu_count() // 2)
 
 TILE_SIZE = 2048
 TILE_OVERLAP = 64

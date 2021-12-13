@@ -9,6 +9,7 @@ from typing import Optional
 from typing import Tuple
 import filepattern
 import numpy
+import utils
 
 if __name__ == "__main__":
     # This needs to be done before importing zarr
@@ -155,13 +156,15 @@ def vector_thread(
             )
             mask = numpy.squeeze(
                 reader[y_min:y_max, x_min:x_max, z_min:z_max, 0, 0] > 0
-            )[numpy.newaxis, ...]
+            )[..., numpy.newaxis]
 
         # arrays are stored as (y, x, z, c, t) but need to be processed as (c, z, y, x)
         if ndims == 2:
             flows = numpy.transpose(flows, (2, 0, 1))
+            mask = numpy.transpose(mask, (2, 0, 1))
         else:
             flows = numpy.transpose(flows, (3, 2, 0, 1))
+            mask = numpy.transpose(mask, (3, 2, 0, 1))
 
         labels = dynamics.vectors_to_labels(flows, mask, 1)
 
@@ -344,6 +347,7 @@ def main(
     files = [Path(files.pop()["file"]).resolve() for files in fp]
     files = list(filter(lambda file_path: str(file_path).endswith(".ome.zarr"), files))
 
+    ProcessManager.num_processes(utils.NUM_THREADS)
     ProcessManager.init_processes("vector-to-label")
 
     if len(files) == 0:
