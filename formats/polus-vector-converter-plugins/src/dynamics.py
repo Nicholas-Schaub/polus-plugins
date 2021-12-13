@@ -526,6 +526,7 @@ def relabel(
     # Propagate the label along the flow
     new_labels = labels[flow_index]
     old_labels = numpy.full(new_labels.shape, -2)
+    resolved = new_labels > -1
 
     while numpy.any(new_labels != old_labels):
         old_labels = new_labels
