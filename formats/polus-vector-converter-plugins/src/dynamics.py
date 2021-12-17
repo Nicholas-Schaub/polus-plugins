@@ -396,7 +396,7 @@ def gradient_store(
 
 
 def labels_to_vectors(
-    masks: numpy.ndarray, name: Optional[str] = None
+    masks: numpy.ndarray, name: Optional[str] = None, use_gpu: Optional[bool] = None
 ) -> numpy.ndarray:
     """Convert labels to vector fields
 
@@ -407,6 +407,8 @@ def labels_to_vectors(
         masks (numpy.ndarray): An image in 2d or 3d
         name (Optional[str], optional): Name of the image to process (for logging
             purposes). Defaults to None.
+        use_gpu (Optional[bool], optional): Override automated device selection and run
+            on either "cpu" or "gpu"
 
     Returns:
         numpy.ndarray: An ND array of vectors, where N is masks.ndims+1, where the first
@@ -419,7 +421,9 @@ def labels_to_vectors(
     process_num = 0 if len(p_identity) == 0 else current_process()._identity[0] - 1
 
     # Detect whether a GPU is present
-    use_gpu = (utils.NUM_GPUS >= process_num) and utils.HAS_CUDA
+    if use_gpu is None:
+        use_gpu = (utils.NUM_GPUS >= process_num) and utils.HAS_CUDA
+
     device = "gpu" if use_gpu else "cpu"
     if use_gpu:
         cupy.cuda.Device(process_num // 2).use()
@@ -608,10 +612,12 @@ def interpolate_flow(vectors: numpy.ndarray, points: numpy.ndarray) -> numpy.nda
 
 
 def vectors_to_labels(
-    vector: numpy.ndarray, mask: numpy.ndarray, r: int
+    vector: numpy.ndarray, mask: numpy.ndarray, r: int, use_gpu: bool = None
 ) -> numpy.ndarray:
 
-    if utils.HAS_CUDA:
+    use_gpu = utils.HAS_CUDA if use_gpu in [True, None] else False
+
+    if use_gpu:
         xp = cupy
         vector = xp.asarray(vector)
         mask = xp.asarray(mask)
@@ -650,7 +656,7 @@ def vectors_to_labels(
     # Boundary pixels
     boundary = mask.squeeze() & ~internal
     boundary_points = xp.where(boundary)
-    if utils.HAS_CUDA:
+    if use_gpu:
         internal = internal.get()
         mask = mask.get()
         boundary_points = tuple(b.get() for b in boundary_points)

@@ -6,7 +6,7 @@ data_path=$(readlink --canonicalize ../../../data)
 data_path=/home/schaubnj/Desktop/Projects/polus-plugins/test/
 
 # Inputs
-inpDir=/data/3d_vectors
+inpDir=/data/eastman_flows
 filePattern=".+"
 
 # GPU configuration for testing GPU usage in the container
