@@ -37,7 +37,7 @@ This plugin can take four types of input argument and one output argument:
 | Name          | Description                                           | I/O    | Type    |
 |---------------|-------------------------------------------------------|--------|---------|
 | `inpDir`      | Input image collection (Single Image Planes/Z Stacks) | Input  | Path    |
-| `pyramidType` | DeepZoom/Neuroglancer/Zarr                                 | Input  | String  |
+| `pyramidType` | DeepZoom/Neuroglancer/Zarr                            | Input  | String  |
 | `filePattern` | Image pattern                                         | Input  | String  |
 | `imageType`   | Neuroglancer type (image/segmentation)                | Input  | String  |
 | `outDir`      | Output image pyramid                                  | Output | Pyramid |
@@ -49,5 +49,8 @@ This plugin can take four types of input argument and one output argument:
 ```bash
 docker run -v /path/to/data:/data labshare/polus-precomputed-slide-plugin \
   --inpDir /data/input \
+  --pyramidType Neuroglancer \
+  --filePattern 'p01_x(01-24)_y(01-16)_wx(0-2)_wy(0-2)_c{c}.ome.tif' \
+  --imageType image
   --outDir /data/output
 ```
