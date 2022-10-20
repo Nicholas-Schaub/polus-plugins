@@ -10,7 +10,7 @@ from preadator import ProcessManager
 
 # Get the output file type from the environment variables, if present.
 FILE_EXT = os.environ.get("POLUS_EXT", None)
-FILE_EXT = FILE_EXT if FILE_EXT is not None else ".ome.tif"
+FILE_EXT = FILE_EXT if FILE_EXT not in [None, ""] else ".ome.tif"
 
 # Initialize the logger
 logging.basicConfig(

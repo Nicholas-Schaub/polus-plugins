@@ -98,6 +98,7 @@ def basic(
             lambda_flatfield_coef=500,
             intensity=True,
             fitting_mode="approximate",
+            device="gpu",
         )
         basic.fit(img_stk)
 
