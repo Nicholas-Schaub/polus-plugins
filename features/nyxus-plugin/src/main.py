@@ -127,7 +127,6 @@ def main(
     ## Adding * to the start and end of nyxus group features
     features = [f"*{f}*" if f in FEATURE_GROUP else f for f in features]
 
-    ProcessManager.num_processes(num_threads)
     ProcessManager.init_processes(name="Nyxus")
 
     int_images = FilePattern(inpDir, intPattern)
