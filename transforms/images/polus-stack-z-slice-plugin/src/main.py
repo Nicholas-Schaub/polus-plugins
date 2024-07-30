@@ -1,4 +1,5 @@
 import argparse, logging, math, filepattern, time, queue
+from typing import Optional
 from bfio import BioReader, BioWriter
 import pathlib
 from preadator import ProcessManager
@@ -109,8 +110,8 @@ def _merge_layers(input_files,output_path,file_offset,num_files):
 def main(input_dir: pathlib.Path,
          file_pattern: str,
          output_dir: pathlib.Path,
-         file_offset: int | None = None
-         num_files: int | None = None
+         file_offset: Optional[int] = None,
+         num_files: Optional[int] = None
          ) -> None:
     
     # create the filepattern object
